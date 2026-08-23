@@ -4,7 +4,7 @@ import { collection, query, getDocs, addDoc, updateDoc, deleteDoc, doc, getDoc, 
 import { db } from '../firebase';
 import { useAuth } from '../components/AuthProvider';
 import { SKU } from '../types';
-import { logAction, hasPermission, isAdmin, isSystemAdmin } from '../utils';
+import { logAction, hasPermission, isAdmin, isSystemAdmin, getSkuWarehouseLocation, getWarehouseDisplayName } from '../utils';
 import { 
   Search, 
   Plus, 
@@ -29,7 +29,7 @@ import { PageHeader } from '../components/PageHeader';
 import { useDebounce } from '../hooks/useDebounce';
 
 export const SKUDatabase = () => {
-  const { profile, user } = useAuth();
+  const { profile, user, activeWarehouse } = useAuth();
   const navigate = useNavigate();
   const [skus, setSkus] = useState<SKU[]>([]);
   const [totalCount, setTotalCount] = useState(0);
@@ -315,9 +315,12 @@ export const SKUDatabase = () => {
     e.target.value = '';
   };
 
+  const locationWarehouse = activeWarehouse || 'AKL';
+  const effectiveSkuLocation = (sku: SKU) => getSkuWarehouseLocation(sku, locationWarehouse);
+
   useEffect(() => {
     fetchSKUs();
-  }, [locationFilter, sortBy, sortOrder]);
+  }, [sortBy, sortOrder]);
 
   const fetchSKUs = async (isNextPage = false) => {
     setLoading(true);
@@ -333,10 +336,6 @@ export const SKUDatabase = () => {
       // 2. Build Query
       let q = query(skusRef, orderBy(sortBy, sortOrder), limit(itemsPerPage));
       
-      if (locationFilter !== 'All') {
-        q = query(skusRef, where('location', '==', locationFilter), orderBy(sortBy, sortOrder), limit(itemsPerPage));
-      }
-
       if (isNextPage && lastDoc) {
         q = query(q, startAfter(lastDoc));
       }
@@ -389,13 +388,14 @@ export const SKUDatabase = () => {
       if (currentSnap.exists()) {
         const dbData = currentSnap.data() as SKU;
         const dbName = (dbData.productName || "").toString().trim();
-        const dbLocation = (dbData.location || "").toString().trim().toUpperCase();
+        const dbLocations = dbData.locations || {};
+        const dbLocation = getSkuWarehouseLocation(dbData, locationWarehouse);
 
         // 规则：有新值用新值，没新值保老值
         finalName = rawName !== "" ? rawName : dbName;
         finalLocation = rawLocation !== "" ? rawLocation : dbLocation;
 
-        if (finalName !== dbName || finalLocation !== dbLocation || (editingSku?.id && editingSku.id !== safeDocId)) {
+        if (finalName !== dbName || finalLocation !== dbLocation || (editingSku?.id && editingSku.id !== safeDocId) || dbLocations[locationWarehouse] !== finalLocation) {
           needsUpdate = true;
         }
       } else {
@@ -412,10 +412,18 @@ export const SKUDatabase = () => {
       }
 
       const now = new Date().toISOString();
+      const existingData = currentSnap.exists() ? currentSnap.data() as SKU : null;
+      const existingLocations = existingData?.locations || {};
       const data: any = {
         sku: skuUpper, // 存入原始 SKU (带斜杠)
         productName: finalName,
-        location: finalLocation,
+        location: locationWarehouse === 'AKL'
+          ? finalLocation
+          : (existingData?.location || 'N/A'),
+        locations: {
+          ...existingLocations,
+          [locationWarehouse]: finalLocation
+        },
         updatedAt: now
       };
 
@@ -688,12 +696,13 @@ export const SKUDatabase = () => {
           if (currentSnap.exists()) {
             const currentData = currentSnap.data() as SKU;
             const dbName = (currentData.productName || "").toString().trim();
-            const dbLocation = (currentData.location || "").toString().trim().toUpperCase();
+            const dbLocations = currentData.locations || {};
+            const dbLocation = getSkuWarehouseLocation(currentData, locationWarehouse);
 
             finalName = data.rawName !== "" ? data.rawName : dbName;
             finalLocation = data.rawLocation !== "" ? data.rawLocation : dbLocation;
 
-            if (finalName !== dbName || finalLocation !== dbLocation) {
+            if (finalName !== dbName || finalLocation !== dbLocation || dbLocations[locationWarehouse] !== finalLocation) {
               needsUpdate = true;
             }
           } else {
@@ -713,7 +722,13 @@ export const SKUDatabase = () => {
           const skuData: SKU = {
             sku: skuUpper,
             productName: finalName,
-            location: finalLocation
+            location: locationWarehouse === 'AKL'
+              ? finalLocation
+              : ((currentSnap.data() as SKU | undefined)?.location || 'N/A'),
+            locations: {
+              ...(((currentSnap.data() as SKU | undefined)?.locations) || {}),
+              [locationWarehouse]: finalLocation
+            }
           };
 
           const now = new Date().toISOString();
@@ -808,20 +823,25 @@ export const SKUDatabase = () => {
           (s.sku || '').toLowerCase().includes(debouncedSearchTerm.toLowerCase()) ||
           (s.productName || '').toLowerCase().includes(debouncedSearchTerm.toLowerCase());
         
-        const matchesLocation = locationFilter === 'All' || s.location === locationFilter;
+        const effectiveLocation = effectiveSkuLocation(s);
+        const matchesLocation = locationFilter === 'All' || effectiveLocation === locationFilter;
         
         return matchesSearch && matchesLocation;
       })
       .sort((a, b) => {
-        const valA = (a[sortBy] || '').toLowerCase();
-        const valB = (b[sortBy] || '').toLowerCase();
+        const valA = sortBy === 'location'
+          ? effectiveSkuLocation(a).toLowerCase()
+          : ((a[sortBy] || '') as string).toLowerCase();
+        const valB = sortBy === 'location'
+          ? effectiveSkuLocation(b).toLowerCase()
+          : ((b[sortBy] || '') as string).toLowerCase();
         if (sortOrder === 'asc') {
           return valA.localeCompare(valB);
         } else {
           return valB.localeCompare(valA);
         }
       });
-  }, [skus, debouncedSearchTerm, locationFilter, sortBy, sortOrder]);
+  }, [skus, debouncedSearchTerm, locationFilter, sortBy, sortOrder, locationWarehouse]);
 
   // Pagination logic
   const totalItems = filteredSkus.length;
@@ -839,8 +859,8 @@ export const SKUDatabase = () => {
   }, [debouncedSearchTerm, locationFilter, sortBy, sortOrder]);
 
   const locations = useMemo(() => 
-    ['All', ...new Set(skus.map(s => s.location).filter(Boolean))].sort(),
-    [skus]
+    ['All', ...new Set(skus.map(s => effectiveSkuLocation(s)).filter(Boolean))].sort(),
+    [skus, locationWarehouse]
   );
 
   const openEdit = (sku?: SKU) => {
@@ -848,7 +868,7 @@ export const SKUDatabase = () => {
       setEditingSku(sku);
       setFormSku(sku.sku);
       setFormName(sku.productName);
-      setFormLocation(sku.location);
+      setFormLocation(effectiveSkuLocation(sku));
     } else {
       setEditingSku(null);
       setFormSku('');
@@ -874,7 +894,7 @@ export const SKUDatabase = () => {
     <div className="flex flex-col h-full w-full bg-slate-50 overflow-hidden font-sans">
       <PageHeader
         title={`SKU Database (${totalCount})`}
-        subtitle="Manage product information and locations."
+        subtitle={`Manage product information and ${getWarehouseDisplayName(locationWarehouse)} locations.`}
         icon={Database}
         isScrolled={isScrolled}
         actions={
@@ -1090,7 +1110,7 @@ export const SKUDatabase = () => {
                     <td className="px-6 py-4 text-slate-600">{sku.productName}</td>
                     <td className="px-6 py-4">
                       <span className="px-2 py-1 bg-indigo-50 text-indigo-600 rounded text-xs font-bold">
-                        {sku.location}
+                        {effectiveSkuLocation(sku)}
                       </span>
                     </td>
                     <td className="px-6 py-4 text-right space-x-2">
@@ -1179,7 +1199,9 @@ export const SKUDatabase = () => {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-2">Location (Optional)</label>
+                <label className="block text-sm font-medium text-slate-700 mb-2">
+                  {getWarehouseDisplayName(locationWarehouse)} Location (Optional)
+                </label>
                 <input
                   type="text"
                   value={formLocation}

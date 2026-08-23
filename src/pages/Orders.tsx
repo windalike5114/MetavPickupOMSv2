@@ -3,7 +3,7 @@ import { collection, query, getDocs } from 'firebase/firestore';
 import { db } from '../firebase';
 import { Order } from '../types';
 import { useAuth } from '../components/AuthProvider';
-import { logAction, cn, safeSearch, formatDate, hasPermission, isAdmin } from '../utils';
+import { logAction, cn, safeSearch, formatDate, hasPermission, isAdmin, getWarehouseDisplayName } from '../utils';
 import { 
   Search, 
   Download, 
@@ -238,7 +238,7 @@ export const Orders = () => {
   }, [notification]);
 
   useEffect(() => {
-    if (activeWarehouse) {
+    if (isCnApiMode || activeWarehouse) {
       fetchOrders();
     }
     fetchStores();
@@ -277,12 +277,13 @@ export const Orders = () => {
   };
 
   const fetchOrders = async () => {
-    if (!activeWarehouse) return;
+    if (!isCnApiMode && !activeWarehouse) return;
     if (!token) return;
     setLoading(true);
     try {
       const cacheScope = isCnApiMode ? 'cn' : 'nz';
-      const cacheKey = `orders:${cacheScope}:${user?.uid || 'anon'}:${activeWarehouse}`;
+      const warehouseScope = isCnApiMode ? 'all-warehouses' : activeWarehouse;
+      const cacheKey = `orders:${cacheScope}:${user?.uid || 'anon'}:${warehouseScope}`;
       const cached = await getOrderCache(cacheKey);
       if (cached?.orders?.length) {
         setOrders(cached.orders);
@@ -302,7 +303,7 @@ export const Orders = () => {
       const response = await fetch(`${API_BASE_URL}/api/orders/list?${params.toString()}`, {
         headers: {
           'x-v2-auth-token': `Bearer ${token}`,
-          'x-warehouse-id': activeWarehouse || ''
+          ...(isCnApiMode ? {} : { 'x-warehouse-id': activeWarehouse || '' })
         }
       });
       const raw = await response.text();
@@ -960,7 +961,7 @@ export const Orders = () => {
         subtitle={
           <>
             <MapPin className="w-4 h-4" />
-            <span>{cnText.warehouse}: <span className="font-bold text-indigo-600">{activeWarehouse}</span></span>
+            <span>{cnText.warehouse}: <span className="font-bold text-indigo-600">{isCnApiMode ? 'AKL + CHC' : getWarehouseDisplayName(activeWarehouse)}</span></span>
           </>
         }
         icon={ShoppingBag}
@@ -992,7 +993,7 @@ export const Orders = () => {
                 <LayoutGrid className="w-5 h-5" />
               </button>
             </div>
-            {hasPermission(profile, 'Create Order', profile?.username || profile?.email) && (
+            {!isCnApiMode && hasPermission(profile, 'Create Order', profile?.username || profile?.email) && (
               <Link 
                 to={`${ordersBasePath}/bulk-import`}
                 className={cn(
@@ -1007,7 +1008,7 @@ export const Orders = () => {
                 )}>{cnText.bulkImport}</span>
               </Link>
             )}
-            {hasPermission(profile, 'Create Order', profile?.username || profile?.email) && (
+            {!isCnApiMode && hasPermission(profile, 'Create Order', profile?.username || profile?.email) && (
               <Link 
                 to={`${ordersBasePath}/create`}
                 className={cn(
@@ -1055,7 +1056,7 @@ export const Orders = () => {
                 <Loader2 className={cn("w-5 h-5", loading && "animate-spin")} />
               </button>
             </div>
-            {selectedOrderIds.length > 0 && hasPermission(profile, 'Review Orders', profile?.username || profile?.email) && (
+            {!isCnApiMode && selectedOrderIds.length > 0 && hasPermission(profile, 'Review Orders', profile?.username || profile?.email) && (
               <div className="flex gap-2">
                 <button
                   onClick={handleBulkReviewClick}
@@ -1312,7 +1313,7 @@ export const Orders = () => {
                               
                               {activeMenuId === order.id && (
                                 <div className="absolute right-0 mt-2 w-48 bg-white border border-slate-200 rounded-xl shadow-xl z-30 py-1 overflow-hidden">
-                                  {hasPermission(profile, 'Confirm Pickup', profile?.username || profile?.email) && order.status === 'Created' && !order.pickupExceptionStatus && (
+                                  {!isCnApiMode && hasPermission(profile, 'Confirm Pickup', profile?.username || profile?.email) && order.status === 'Created' && !order.pickupExceptionStatus && (
                                     <button
                                       onClick={() => openConfirmPickup(order)}
                                       className="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 flex items-center gap-2"
@@ -1321,13 +1322,15 @@ export const Orders = () => {
                                       {cnText.confirmPickup}
                                     </button>
                                   )}
-                                  <button
-                                    onClick={() => handleSingleEmail(order)}
-                                    className="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 flex items-center gap-2"
-                                  >
-                                    <Mail className="w-4 h-4 text-emerald-500" />
-                                    {cnText.sendPickupEmail}
-                                  </button>
+                                  {!isCnApiMode && (
+                                    <button
+                                      onClick={() => handleSingleEmail(order)}
+                                      className="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 flex items-center gap-2"
+                                    >
+                                      <Mail className="w-4 h-4 text-emerald-500" />
+                                      {cnText.sendPickupEmail}
+                                    </button>
+                                  )}
                                   <button
                                     onClick={() => navigate(getOrderDetailPath(order.id))}
                                     className="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 flex items-center gap-2"

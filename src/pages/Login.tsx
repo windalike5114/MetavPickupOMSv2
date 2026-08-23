@@ -18,8 +18,12 @@ export const Login = () => {
 
   useEffect(() => {
     if (user && profile) {
+      if (CN_API_ONLY) {
+        navigate('/cn');
+        return;
+      }
       if (activeWarehouse) {
-        navigate(CN_API_ONLY ? '/cn' : '/');
+        navigate('/');
       } else {
         navigate('/select-warehouse');
       }
@@ -57,7 +61,7 @@ export const Login = () => {
         // Ensure warehouse is selected before entering order pages.
         if (localStorage.getItem('x-v2-auth-token')) {
            const savedWarehouse = sessionStorage.getItem('activeWarehouse');
-           navigate(savedWarehouse ? (CN_API_ONLY ? '/cn' : '/') : '/select-warehouse');
+           navigate(CN_API_ONLY ? '/cn' : (savedWarehouse ? '/' : '/select-warehouse'));
         } else {
            alert("LocalStorage 写入失败！");
         }

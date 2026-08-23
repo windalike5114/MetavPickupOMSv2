@@ -261,7 +261,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   return (
     <AuthContext.Provider value={value}>
       {children}
-      {user && profile && profile.allowedWarehouses && profile.allowedWarehouses.length > 1 && !activeWarehouse && (
+      {!CN_API_ONLY && user && profile && profile.allowedWarehouses && profile.allowedWarehouses.length > 1 && !activeWarehouse && (
         <WarehouseSelector 
           allowedWarehouses={profile.allowedWarehouses} 
           onSelect={setActiveWarehouse} 

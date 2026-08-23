@@ -3,7 +3,7 @@ import { collection, query, where, getDocs, orderBy } from 'firebase/firestore';
 import { db } from '../firebase';
 import { useAuth } from '../components/AuthProvider';
 import { SKU, OrderItem, Store, UserProfile, UserGroup } from '../types';
-import { handleFirestoreError, OperationType, resolveRecipients, cn } from '../utils';
+import { handleFirestoreError, OperationType, resolveRecipients, cn, getSkuWarehouseLocation } from '../utils';
 import { useClickOutside } from '../hooks/useClickOutside';
 import { 
   Plus, 
@@ -216,7 +216,7 @@ export const OrderCreate = () => {
         setItems([...items, { 
           sku: sku.sku, 
           productName: sku.productName, 
-          location: sku.location, 
+          location: getSkuWarehouseLocation(sku, activeWarehouse), 
           qty: 1, 
           unit_price: 0 
         }]);

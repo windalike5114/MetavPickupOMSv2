@@ -50,7 +50,7 @@ import {
   Send,
   MessageSquare
 } from 'lucide-react';
-import { formatDate, hasPermission, cn } from '../utils';
+import { formatDate, hasPermission, cn, getSkuWarehouseLocation } from '../utils';
 import { motion, AnimatePresence } from 'motion/react';
 import SignatureCanvas from 'react-signature-canvas';
 import html2canvas from 'html2canvas-pro';
@@ -351,7 +351,7 @@ export const OrderDetail: React.FC = () => {
                 enrichedItems[i] = {
                   ...item,
                   productName: item.productName || skuData.productName || '',
-                  location: (item.location && item.location !== 'N/A') ? item.location : (skuData.location || 'N/A')
+                  location: (item.location && item.location !== 'N/A') ? item.location : getSkuWarehouseLocation(skuData, activeWarehouse)
                 };
               }
             } catch (err) {
@@ -1113,7 +1113,7 @@ export const OrderDetail: React.FC = () => {
         }
         actions={
           <>
-            {hasPermission(profile, 'Edit Order', profile?.username || profile?.email) && order.status !== 'Cancelled' && !isOrderLocked && (
+            {!isCnApiMode && hasPermission(profile, 'Edit Order', profile?.username || profile?.email) && order.status !== 'Cancelled' && !isOrderLocked && (
               <button
                 onClick={() => setIsEditing(true)}
                 className="inline-flex items-center px-3 py-1.5 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-700 hover:bg-slate-50 transition-all"
@@ -1123,7 +1123,7 @@ export const OrderDetail: React.FC = () => {
               </button>
             )}
 
-            {(hasPermission(profile, 'Add Payment', profile?.username || profile?.email) || hasPermission(profile, 'Edit Payment', profile?.username || profile?.email)) && order.status !== 'Cancelled' && !isOrderLocked && (
+            {!isCnApiMode && (hasPermission(profile, 'Add Payment', profile?.username || profile?.email) || hasPermission(profile, 'Edit Payment', profile?.username || profile?.email)) && order.status !== 'Cancelled' && !isOrderLocked && (
               <button
                 onClick={openPaymentEditor}
                 className="inline-flex items-center px-3 py-1.5 bg-emerald-50 border border-emerald-200 rounded-xl text-xs font-bold text-emerald-700 hover:bg-emerald-100 transition-all"
@@ -1143,7 +1143,7 @@ export const OrderDetail: React.FC = () => {
               </button>
             )}
 
-            {hasPermission(profile, 'Request Picking', profile?.username || profile?.email) && !order.warehouseStatus && order.status === 'Created' && (
+            {!isCnApiMode && hasPermission(profile, 'Request Picking', profile?.username || profile?.email) && !order.warehouseStatus && order.status === 'Created' && (
               <button
                 onClick={handleRequestPicking}
                 className="inline-flex items-center px-3 py-1.5 bg-indigo-600 rounded-xl text-xs font-bold text-white hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-200"
@@ -1153,7 +1153,7 @@ export const OrderDetail: React.FC = () => {
               </button>
             )}
 
-            {hasPermission(profile, 'Confirm Pickup', profile?.username || profile?.email) && order.status === 'Created' && !order.pickupExceptionStatus && (
+            {!isCnApiMode && hasPermission(profile, 'Confirm Pickup', profile?.username || profile?.email) && order.status === 'Created' && !order.pickupExceptionStatus && (
               <button
                 onClick={startPickupConfirmationFlow}
                 className="inline-flex items-center px-3 py-1.5 bg-emerald-600 rounded-xl text-xs font-bold text-white hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-200"
@@ -1163,7 +1163,7 @@ export const OrderDetail: React.FC = () => {
               </button>
             )}
 
-            {hasPermission(profile, 'Edit Order', profile?.username || profile?.email) && order.status === 'Created' && order.pickupExceptionStatus === 'PartialPendingSales' && (
+            {!isCnApiMode && hasPermission(profile, 'Edit Order', profile?.username || profile?.email) && order.status === 'Created' && order.pickupExceptionStatus === 'PartialPendingSales' && (
               <button
                 onClick={handleMarkPartialReady}
                 disabled={partialFlowLoading}
@@ -1173,7 +1173,7 @@ export const OrderDetail: React.FC = () => {
               </button>
             )}
 
-            {hasPermission(profile, 'Finalize Partial Pickup', profile?.username || profile?.email) && order.status === 'Created' && order.pickupExceptionStatus === 'PendingFinalize' && (
+            {!isCnApiMode && hasPermission(profile, 'Finalize Partial Pickup', profile?.username || profile?.email) && order.status === 'Created' && order.pickupExceptionStatus === 'PendingFinalize' && (
               <button
                 onClick={handleFinalizePartialPickup}
                 disabled={partialFlowLoading}
@@ -1183,7 +1183,7 @@ export const OrderDetail: React.FC = () => {
               </button>
             )}
 
-            {hasPermission(profile, 'Review Orders', profile?.username || profile?.email) && order.status === 'Picked Up' && (
+            {!isCnApiMode && hasPermission(profile, 'Review Orders', profile?.username || profile?.email) && order.status === 'Picked Up' && (
               <button
                 onClick={() => handleStatusChange('Reviewed')}
                 className="inline-flex items-center px-3 py-1.5 bg-purple-600 rounded-xl text-xs font-bold text-white hover:bg-purple-700 transition-all shadow-lg shadow-purple-200"
@@ -1193,7 +1193,7 @@ export const OrderDetail: React.FC = () => {
               </button>
             )}
 
-            {hasPermission(profile, 'Cancel Orders', profile?.username || profile?.email) && order.status !== 'Cancelled' && (
+            {!isCnApiMode && hasPermission(profile, 'Cancel Orders', profile?.username || profile?.email) && order.status !== 'Cancelled' && (
               <button
                 onClick={() => handleStatusChange('Cancelled')}
                 className="inline-flex items-center px-3 py-1.5 bg-red-50 rounded-xl text-xs font-bold text-red-600 hover:bg-red-100 transition-all"

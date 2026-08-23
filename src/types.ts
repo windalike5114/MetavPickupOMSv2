@@ -17,6 +17,7 @@ export interface SKU {
   sku: string;
   productName: string;
   location: string;
+  locations?: Record<string, string>;
   createdAt?: string;
   updatedAt?: string;
 }

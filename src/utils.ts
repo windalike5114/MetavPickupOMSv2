@@ -139,6 +139,28 @@ export const cn = (...inputs: any[]) => {
   return inputs.filter(Boolean).join(' ');
 };
 
+export const getWarehouseDisplayName = (warehouseId?: string | null): string => {
+  if (!warehouseId) return 'Unassigned';
+  if (warehouseId === 'AKL') return 'Auckland';
+  if (warehouseId === 'CHC') return 'Christchurch';
+  return warehouseId;
+};
+
+export const getSkuWarehouseLocation = (
+  sku: { location?: string | null; locations?: Record<string, string> | null },
+  warehouseId?: string | null
+): string => {
+  const wh = warehouseId || 'AKL';
+  const warehouseLocation = sku.locations?.[wh];
+  if (warehouseLocation && String(warehouseLocation).trim()) {
+    return String(warehouseLocation).trim().toUpperCase();
+  }
+  const fallback = sku.location && String(sku.location).trim()
+    ? String(sku.location).trim().toUpperCase()
+    : 'N/A';
+  return fallback;
+};
+
 export const safeSearch = (value: string | null | undefined, term: string): boolean => {
   if (!term) return true;
   if (!value) return false;

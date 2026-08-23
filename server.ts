@@ -157,6 +157,87 @@ const normalizeCounterPickupOrderNumber = (sourceType: any, value: any) => {
   return raw.startsWith(prefix) ? raw : `${prefix}${raw}`;
 };
 
+const resolveSkuLocationForWarehouse = (skuData: any, warehouseId?: string | null) => {
+  const wh = warehouseId || "AKL";
+  const warehouseLocation = skuData?.locations?.[wh];
+  if (warehouseLocation && String(warehouseLocation).trim()) {
+    return String(warehouseLocation).trim().toUpperCase();
+  }
+  const legacyLocation = skuData?.location;
+  return legacyLocation && String(legacyLocation).trim()
+    ? String(legacyLocation).trim().toUpperCase()
+    : "N/A";
+};
+
+const normalizeWarehouseId = (value: any) => {
+  const raw = String(value || "").trim().toUpperCase();
+  return raw === "AKL" || raw === "CHC" ? raw : "";
+};
+
+const normalizeLocationValue = (value: any) => String(value || "").trim().toUpperCase();
+
+const normalizeSkuLocationsPayload = (value: any) => {
+  const normalized: Record<string, string> = {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) return normalized;
+
+  ["AKL", "CHC"].forEach((warehouseId) => {
+    const location = normalizeLocationValue(value[warehouseId] ?? value[warehouseId.toLowerCase()]);
+    if (location) normalized[warehouseId] = location;
+  });
+
+  return normalized;
+};
+
+const normalizeExistingSkuLocations = (value: any) => {
+  const normalized: Record<string, string> = {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) return normalized;
+
+  Object.entries(value).forEach(([key, val]) => {
+    const warehouseId = normalizeWarehouseId(key);
+    const location = normalizeLocationValue(val);
+    if (warehouseId && location) normalized[warehouseId] = location;
+  });
+
+  return normalized;
+};
+
+const pickNumericPayloadField = (item: any, keys: string[]) => {
+  for (const key of keys) {
+    const value = item?.[key];
+    if (value === undefined || value === null || value === "") continue;
+    const numericValue = Number(value);
+    if (Number.isFinite(numericValue)) return numericValue;
+  }
+  return undefined;
+};
+
+const extractSkuInventoryFields = (item: any) => {
+  const fields: Record<string, number> = {};
+  const mappings: Array<[string, string[]]> = [
+    ["availableQty", ["availableQty", "available_qty", "qtyAvailable", "quantityAvailable"]],
+    ["stockQty", ["stockQty", "stock_qty", "stock", "stockQuantity"]],
+    ["onHandQty", ["onHandQty", "on_hand_qty", "onHand", "on_hand"]],
+    ["allocatedQty", ["allocatedQty", "allocated_qty", "allocated"]],
+    ["inventoryQty", ["inventoryQty", "inventory_qty", "inventory"]]
+  ];
+
+  mappings.forEach(([targetKey, sourceKeys]) => {
+    const numericValue = pickNumericPayloadField(item, sourceKeys);
+    if (numericValue !== undefined) fields[targetKey] = numericValue;
+  });
+
+  return fields;
+};
+
+const locationsEqual = (a: Record<string, string>, b: Record<string, string>) =>
+  a.AKL === b.AKL && a.CHC === b.CHC;
+
+const isCnPortalRequest = (req: any) => {
+  const host = String(req.headers?.host || "").toLowerCase();
+  const referer = String(req.headers?.referer || "").toLowerCase();
+  return host.startsWith("cn.") || referer.includes("/cn");
+};
+
 const isFrontDeskRole = (user: any) => {
   const role = user?.roleTemplate || user?.role || "";
   return ["Reception", "Admin"].includes(role);
@@ -461,6 +542,7 @@ async function startServer() {
       const limitValue = Math.min(Math.max(Number(req.query.limit) || 1000, 1), 2000);
       const isSuper = SUPER_ADMINS.includes((req.user.username || "").toLowerCase());
       const isSales = (req.user.role === 'Sales') || (req.user.roleTemplate === 'Sales');
+      const isCnPortal = isCnPortalRequest(req);
       const allowedWarehouses: string[] = req.user.allowedWarehouses || [];
 
       if (!isSuper && !isSales && !allowedWarehouses.includes("*") && warehouseId && !allowedWarehouses.includes(warehouseId)) {
@@ -555,7 +637,9 @@ async function startServer() {
 
       // Unassigned orders stay cross-warehouse visible until pickup confirms warehouse.
       const needsAklCompatScan = !warehouseId || warehouseId === "AKL";
-      let effectiveWarehouses = isSuper || isSales || allowedWarehouses.includes("*")
+      let effectiveWarehouses = isCnPortal
+        ? ["AKL", "CHC"]
+        : isSuper || isSales || allowedWarehouses.includes("*")
         ? null
         : allowedWarehouses;
       // Compatibility fallback: if user's warehouse permissions are empty,
@@ -634,8 +718,12 @@ async function startServer() {
       const orderWarehouse = order.warehouseId || null;
       const isSuper = SUPER_ADMINS.includes((req.user.username || "").toLowerCase());
       const isSales = (req.user.role === 'Sales') || (req.user.roleTemplate === 'Sales');
+      const isCnPortal = isCnPortalRequest(req);
       const allowedWarehouses: string[] = req.user.allowedWarehouses || [];
-      if (!isSuper && !isSales && orderWarehouse && !allowedWarehouses.includes("*") && !allowedWarehouses.includes(orderWarehouse)) {
+      if (isCnPortal && orderWarehouse && !["AKL", "CHC"].includes(orderWarehouse)) {
+        return res.status(403).json({ success: false, error: "Forbidden: CN portal can only view AKL and CHC warehouse records" });
+      }
+      if (!isCnPortal && !isSuper && !isSales && orderWarehouse && !allowedWarehouses.includes("*") && !allowedWarehouses.includes(orderWarehouse)) {
         return res.status(403).json({ success: false, error: "Forbidden: Access denied to this warehouse" });
       }
 
@@ -693,12 +781,20 @@ async function startServer() {
       const limitValue = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
       if (term.length < 2) return res.json({ success: true, skus: [] });
 
+      const requestedWh = (req.headers["x-warehouse-id"] as string) || "";
       const snap = await currentDb.collection("skus")
         .where("sku", ">=", term)
         .where("sku", "<=", term + "\uf8ff")
         .limit(limitValue)
         .get();
-      const skus = snap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+      const skus = snap.docs.map((d: any) => {
+        const data = d.data();
+        return {
+          id: d.id,
+          ...data,
+          location: resolveSkuLocationForWarehouse(data, requestedWh)
+        };
+      });
       return res.json({ success: true, skus });
     } catch (error: any) {
       console.error("SKU Search Error:", error);
@@ -715,11 +811,14 @@ async function startServer() {
       const requestedWh = (req.headers["x-warehouse-id"] as string) || "";
       const limitValue = Math.min(Math.max(Number(req.query.limit) || 200, 1), 500);
       const isSuper = SUPER_ADMINS.includes((req.user.username || "").toLowerCase());
+      const isCnPortal = isCnPortalRequest(req);
       const allowedWarehouses: string[] = req.user.allowedWarehouses || [];
 
       let warehouseIds: string[] = [];
       if (requestedWh) {
         warehouseIds = [requestedWh];
+      } else if (isCnPortal) {
+        warehouseIds = ["AKL", "CHC"];
       } else if (isSuper || allowedWarehouses.includes("*")) {
         const allSnap = await currentDb.collection("counter_pickups")
           .orderBy(view === "history" ? "updatedAt" : "createdAt", "desc")
@@ -733,7 +832,7 @@ async function startServer() {
         warehouseIds = allowedWarehouses.filter(Boolean).slice(0, 10);
       }
 
-      if (!isSuper && !allowedWarehouses.includes("*") && warehouseIds.some((wh) => !allowedWarehouses.includes(wh))) {
+      if (!isCnPortal && !isSuper && !allowedWarehouses.includes("*") && warehouseIds.some((wh) => !allowedWarehouses.includes(wh))) {
         return res.status(403).json({ success: false, error: "Forbidden: You do not have access to this warehouse" });
       }
 
@@ -822,7 +921,10 @@ async function startServer() {
         const skuSnap = await currentDb.collection("skus").where("sku", "==", itemSku).limit(1).get();
         const skuData = skuSnap.empty ? null : skuSnap.docs[0].data() as any;
         const resolvedProductName = skuData?.productName || itemManualProductName || itemSku;
-        const resolvedLocation = skuData?.location || itemManualLocation || "NOT_ASSIGNED";
+        const skuLocation = skuData ? resolveSkuLocationForWarehouse(skuData, warehouseId) : "";
+        const resolvedLocation = skuLocation && skuLocation !== "N/A"
+          ? skuLocation
+          : (itemManualLocation || "NOT_ASSIGNED");
         if (!resolvedProductName) {
           return res.status(400).json({ success: false, error: "Product name is required for unmatched or special SKU" });
         }
@@ -901,6 +1003,15 @@ async function startServer() {
       if (!snap.exists) return res.status(404).json({ success: false, error: "Counter pickup not found" });
 
       const data = snap.data() as any;
+      const requestedWh = (req.headers["x-warehouse-id"] as string) || "";
+      const isSuper = SUPER_ADMINS.includes((req.user.username || "").toLowerCase());
+      const allowedWarehouses: string[] = req.user.allowedWarehouses || [];
+      if (data.warehouseId && requestedWh && data.warehouseId !== requestedWh) {
+        return res.status(403).json({ success: false, error: "Forbidden: Counter pickup belongs to a different warehouse" });
+      }
+      if (!isSuper && data.warehouseId && !allowedWarehouses.includes("*") && !allowedWarehouses.includes(data.warehouseId)) {
+        return res.status(403).json({ success: false, error: "Forbidden: You do not have access to this warehouse" });
+      }
       if (data.status !== "PendingPick" || data.queueStatus !== "Pending") {
         return res.status(409).json({ success: false, error: "Counter pickup is not in Pending queue state" });
       }
@@ -942,6 +1053,15 @@ async function startServer() {
       if (!snap.exists) return res.status(404).json({ success: false, error: "Counter pickup not found" });
 
       const data = snap.data() as any;
+      const requestedWh = (req.headers["x-warehouse-id"] as string) || "";
+      const isSuper = SUPER_ADMINS.includes((req.user.username || "").toLowerCase());
+      const allowedWarehouses: string[] = req.user.allowedWarehouses || [];
+      if (data.warehouseId && requestedWh && data.warehouseId !== requestedWh) {
+        return res.status(403).json({ success: false, error: "Forbidden: Counter pickup belongs to a different warehouse" });
+      }
+      if (!isSuper && data.warehouseId && !allowedWarehouses.includes("*") && !allowedWarehouses.includes(data.warehouseId)) {
+        return res.status(403).json({ success: false, error: "Forbidden: You do not have access to this warehouse" });
+      }
       if (data.status !== "PendingPick") {
         return res.status(409).json({ success: false, error: "Only PendingPick requests can be marked as picked" });
       }
@@ -989,6 +1109,15 @@ async function startServer() {
       if (!snap.exists) return res.status(404).json({ success: false, error: "Counter pickup not found" });
 
       const data = snap.data() as any;
+      const requestedWh = (req.headers["x-warehouse-id"] as string) || "";
+      const isSuper = SUPER_ADMINS.includes((req.user.username || "").toLowerCase());
+      const allowedWarehouses: string[] = req.user.allowedWarehouses || [];
+      if (data.warehouseId && requestedWh && data.warehouseId !== requestedWh) {
+        return res.status(403).json({ success: false, error: "Forbidden: Counter pickup belongs to a different warehouse" });
+      }
+      if (!isSuper && data.warehouseId && !allowedWarehouses.includes("*") && !allowedWarehouses.includes(data.warehouseId)) {
+        return res.status(403).json({ success: false, error: "Forbidden: You do not have access to this warehouse" });
+      }
       if (data.status !== "Picked") {
         return res.status(409).json({ success: false, error: "Only Picked requests can be finalized by reception" });
       }
@@ -1169,6 +1298,15 @@ async function startServer() {
       if (!snap.exists) return res.status(404).json({ success: false, error: "Counter pickup not found" });
 
       const data = snap.data() as any;
+      const requestedWh = (req.headers["x-warehouse-id"] as string) || "";
+      const isSuper = SUPER_ADMINS.includes((req.user.username || "").toLowerCase());
+      const allowedWarehouses: string[] = req.user.allowedWarehouses || [];
+      if (data.warehouseId && requestedWh && data.warehouseId !== requestedWh) {
+        return res.status(403).json({ success: false, error: "Forbidden: Putback task belongs to a different warehouse" });
+      }
+      if (!isSuper && data.warehouseId && !allowedWarehouses.includes("*") && !allowedWarehouses.includes(data.warehouseId)) {
+        return res.status(403).json({ success: false, error: "Forbidden: You do not have access to this warehouse" });
+      }
       if (data.status !== "PendingPutback") {
         return res.status(409).json({ success: false, error: "Only PendingPutback requests can be completed" });
       }
@@ -2762,7 +2900,7 @@ async function startServer() {
   console.log(`ECPP API Key status: ${process.env.ECPP_API_KEY ? "Configured" : "Not Configured"}`);
 
   // ECPP Push API
-  // Accepts: { sku: string, location?: string } OR [{ sku: string, location?: string }, ...]
+  // Accepts legacy { sku, location } and warehouse-aware { sku, warehouseId, location } or { sku, locations: { AKL, CHC } }.
   // Header: Authorization: <API_KEY>
   app.post("/api/ecpp/push", async (req, res) => {
     const currentDb = await initDb();
@@ -2847,10 +2985,18 @@ async function startServer() {
           const skuUpper = (item.sku || item.SKU).toString().trim().toUpperCase();
           const safeDocId = skuUpper.replace(/\//g, '_');
           const rawName = (item.productName || item.productname || item.product_name || item.name || "").toString().trim();
-          const rawLocation = (item.location || item.Location || "").toString().trim().toUpperCase();
+          const rawLocation = normalizeLocationValue(item.location || item.Location);
+          const payloadWarehouseId = normalizeWarehouseId(item.warehouseId || item.warehouse || item.Warehouse || item.warehouse_id);
+          const payloadLocations = normalizeSkuLocationsPayload(item.locations || item.Locations);
+          const inventoryFields = extractSkuInventoryFields(item);
+          const hasLegacyLocationPayload = !payloadWarehouseId && Object.keys(payloadLocations).length === 0 && rawLocation !== "";
+          const hasWarehouseLocationPayload = !!payloadWarehouseId && rawLocation !== "";
+          const hasLocationsPayload = Object.keys(payloadLocations).length > 0;
 
           const currentSnap = existingDocs[j];
-          let finalName, finalLocation;
+          let finalName: string;
+          let finalLocation: string;
+          let finalLocations: Record<string, string> = {};
           let needsUpdate = false;
 
           // 2. 🧠 核心大脑：判断是老数据合并，还是新数据创建
@@ -2858,21 +3004,60 @@ async function startServer() {
             // 【情况 A：老数据存在】
             const dbData = currentSnap.data() || {};
             const dbName = (dbData.productName || "").toString().trim();
-            const dbLocation = (dbData.location || "").toString().trim().toUpperCase();
+            const dbLocation = normalizeLocationValue(dbData.location);
+            const dbLocations = normalizeExistingSkuLocations(dbData.locations);
 
             // 规则：有新值用新值，没新值保老值（绝不触发 Fallback 破坏数据）
             finalName = rawName !== "" ? rawName : dbName;
-            finalLocation = rawLocation !== "" ? rawLocation : dbLocation;
+            finalLocations = { ...dbLocations };
+
+            if (hasLocationsPayload) {
+              Object.assign(finalLocations, payloadLocations);
+            }
+
+            if (hasWarehouseLocationPayload) {
+              finalLocations[payloadWarehouseId] = rawLocation;
+            }
+
+            if (hasLegacyLocationPayload) {
+              finalLocation = rawLocation;
+              finalLocations.AKL = rawLocation;
+            } else if (payloadLocations.AKL) {
+              finalLocation = payloadLocations.AKL;
+            } else if (payloadWarehouseId === "AKL" && rawLocation) {
+              finalLocation = rawLocation;
+            } else {
+              finalLocation = dbLocation || "N/A";
+            }
 
             // 对比是否真的发生改变
-            if (finalName !== dbName || finalLocation !== dbLocation) {
+            if (finalName !== dbName || finalLocation !== dbLocation || !locationsEqual(finalLocations, dbLocations)) {
               needsUpdate = true;
+            }
+
+            for (const [field, value] of Object.entries(inventoryFields)) {
+              if (Number(dbData[field]) !== value) needsUpdate = true;
             }
           } else {
             // 【情况 B：完全陌生的新 SKU】
             // 规则：触发 Fallback 自动填充
             finalName = rawName !== "" ? rawName : skuUpper;
-            finalLocation = rawLocation !== "" ? rawLocation : "N/A";
+            finalLocations = { ...payloadLocations };
+
+            if (hasWarehouseLocationPayload) {
+              finalLocations[payloadWarehouseId] = rawLocation;
+            }
+
+            if (hasLegacyLocationPayload) {
+              finalLocation = rawLocation;
+              finalLocations.AKL = rawLocation;
+            } else if (payloadLocations.AKL) {
+              finalLocation = payloadLocations.AKL;
+            } else if (payloadWarehouseId === "AKL" && rawLocation) {
+              finalLocation = rawLocation;
+            } else {
+              finalLocation = "N/A";
+            }
             needsUpdate = true; // 新数据必须写入
           }
 
@@ -2889,6 +3074,12 @@ async function startServer() {
             location: finalLocation,
             updatedAt: new Date().toISOString()
           };
+
+          if (Object.keys(finalLocations).length > 0) {
+            updateData.locations = finalLocations;
+          }
+
+          Object.assign(updateData, inventoryFields);
 
           if (!currentSnap.exists) {
             updateData.createdAt = updateData.updatedAt;

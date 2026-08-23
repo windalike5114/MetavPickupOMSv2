@@ -124,7 +124,6 @@ const ProtectedCnRoute: React.FC<{ children: React.ReactNode }> = ({ children })
   }
 
   if (!user) return <Navigate to="/login" />;
-  if (!activeWarehouse && window.location.pathname !== '/select-warehouse') return <Navigate to="/select-warehouse" />;
   if (profile?.status === 'Disabled') {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4 text-center">

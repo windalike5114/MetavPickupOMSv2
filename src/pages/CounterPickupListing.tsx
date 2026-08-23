@@ -17,7 +17,7 @@ import { PageHeader } from '../components/PageHeader';
 import { useAuth } from '../components/AuthProvider';
 import { useClickOutside } from '../hooks/useClickOutside';
 import { CounterPickup, CounterPickupOutcome, CounterPickupQueueStatus, CounterPickupRequestType, CounterPickupSourceType, CounterPickupStatus, SKU } from '../types';
-import { cn, formatDate, getAucklandDateKey, getAucklandBusinessDayWindow, hasPermission } from '../utils';
+import { cn, formatDate, getAucklandDateKey, getAucklandBusinessDayWindow, hasPermission, getSkuWarehouseLocation } from '../utils';
 import * as XLSX from 'xlsx';
 
 type ListingView = 'active' | 'history';
@@ -46,6 +46,12 @@ type CounterPickupItem = {
   qty: number;
   productName: string;
   location: string;
+  outcome?: string | null;
+  destination?: string | null;
+  orderNumber?: string | null;
+  referenceNo?: string | null;
+  comment?: string | null;
+  finalizedAt?: string | null;
 };
 
 type CounterPickupItemDraft = {
@@ -82,6 +88,9 @@ type CounterPickupRow = {
     location: string;
     outcome?: string | null;
     destination?: string | null;
+    orderNumber?: string | null;
+    referenceNo?: string | null;
+    comment?: string | null;
     finalizedAt?: string | null;
   };
   itemIndex: number;
@@ -356,12 +365,14 @@ export const CounterPickupListing: React.FC = () => {
   const skuRef = useRef<HTMLDivElement>(null);
   useClickOutside(skuRef, () => setDraft((prev) => ({ ...prev, showSkuResults: false })));
 
-  const canCreate = profile?.roleTemplate === 'Reception' || profile?.roleTemplate === 'Admin';
+  const canCreate = !isCnRoute && (profile?.roleTemplate === 'Reception' || profile?.roleTemplate === 'Admin');
   const canManageWarehouse =
-    profile?.roleTemplate === 'Warehouse' ||
-    profile?.roleTemplate === 'Admin' ||
-    hasPermission(profile, 'Manage Picking', profile?.username || profile?.email);
-  const canViewPage = canCreate || canManageWarehouse;
+    !isCnRoute && (
+      profile?.roleTemplate === 'Warehouse' ||
+      profile?.roleTemplate === 'Admin' ||
+      hasPermission(profile, 'Manage Picking', profile?.username || profile?.email)
+    );
+  const canViewPage = isCnRoute || canCreate || canManageWarehouse;
 
   useEffect(() => {
     const observer = new IntersectionObserver(([entry]) => setIsScrolled(!entry.isIntersecting), { threshold: 0 });
@@ -389,7 +400,7 @@ export const CounterPickupListing: React.FC = () => {
       const response = await fetch(`/api/counter-pickups/list?view=${nextView}&limit=500`, {
         headers: {
           'x-v2-auth-token': `Bearer ${token}`,
-          'x-warehouse-id': activeWarehouse || ''
+          ...(isCnRoute ? {} : { 'x-warehouse-id': activeWarehouse || '' })
         }
       });
       const data = await response.json();
@@ -458,6 +469,7 @@ export const CounterPickupListing: React.FC = () => {
   }, [draft.skuQuery, token, activeWarehouse, text.searchSkuError]);
 
   const applySelectedSku = (selected: SKU) => {
+    const selectedLocation = getSkuWarehouseLocation(selected, activeWarehouse);
     suppressSkuSearchRef.current = true;
     setDraft((prev) => ({
       ...prev,
@@ -465,10 +477,10 @@ export const CounterPickupListing: React.FC = () => {
       skuQuery: selected.sku,
       skuMeta: {
         productName: selected.productName || selected.sku,
-        location: selected.location || 'NOT_ASSIGNED'
+        location: selectedLocation || 'NOT_ASSIGNED'
       },
       manualProductName: selected.productName || '',
-      manualLocation: selected.location || 'NOT_ASSIGNED',
+      manualLocation: selectedLocation || 'NOT_ASSIGNED',
       skuLookupMiss: false,
       showSkuResults: false
     }));
@@ -1667,21 +1679,6 @@ export const CounterPickupListing: React.FC = () => {
                                       <div className="whitespace-nowrap text-[11px] text-slate-400">{formatDate(item.createdAt, 'HH:mm')}</div>
                                     </div>
                                   </td>
-                                  {view === 'history' && (
-                                    <>
-                                      <td rowSpan={requestItems.length} className="hidden md:table-cell px-3 py-3 text-slate-500 align-top font-medium text-sm break-all">
-                                        <span className={historyTableTextClass}>{referenceLabelForHistory(entry, item)}</span>
-                                      </td>
-                                      <td rowSpan={requestItems.length} className="hidden md:table-cell px-3 py-3 text-slate-500 align-top text-sm">
-                                        <span className={historyTableTextClass}>{destinationLabelForHistory(entry, item)}</span>
-                                      </td>
-                                    </>
-                                  )}
-                                  {view === 'history' && (
-                                    <td rowSpan={requestItems.length} className="hidden md:table-cell px-3 py-3 text-slate-600 align-top text-sm break-words">
-                                      <span className={historyTableTextClass}>{historyCommentLabel(entry, item)}</span>
-                                    </td>
-                                  )}
                                   <td rowSpan={requestItems.length} className="px-3 py-3 align-top">
                                     <div className="flex justify-end gap-1.5 flex-wrap">
                                       {canCreate && item.status === 'Picked' && (
