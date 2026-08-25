@@ -174,7 +174,15 @@ const normalizeWarehouseId = (value: any) => {
   return raw === "AKL" || raw === "CHC" ? raw : "";
 };
 
-const normalizeLocationValue = (value: any) => String(value || "").trim().toUpperCase();
+const normalizeLocationValue = (value: any) => {
+  // Never coerce structured payloads: String({ ... }) becomes "[object Object]"
+  // and would otherwise be persisted as a real warehouse location.
+  if (typeof value !== "string" && typeof value !== "number") return "";
+  const normalized = String(value).trim().toUpperCase();
+  // Treat values written by the old coercion bug as missing so the next valid
+  // push can replace them instead of preserving the corrupt legacy value.
+  return normalized === "[OBJECT OBJECT]" ? "" : normalized;
+};
 
 const normalizeSkuLocationsPayload = (value: any) => {
   const normalized: Record<string, string> = {};
@@ -2985,9 +2993,14 @@ async function startServer() {
           const skuUpper = (item.sku || item.SKU).toString().trim().toUpperCase();
           const safeDocId = skuUpper.replace(/\//g, '_');
           const rawName = (item.productName || item.productname || item.product_name || item.name || "").toString().trim();
-          const rawLocation = normalizeLocationValue(item.location || item.Location);
+          const locationPayload = item.location ?? item.Location;
+          const rawLocation = normalizeLocationValue(locationPayload);
           const payloadWarehouseId = normalizeWarehouseId(item.warehouseId || item.warehouse || item.Warehouse || item.warehouse_id);
-          const payloadLocations = normalizeSkuLocationsPayload(item.locations || item.Locations);
+          // Some clients send the warehouse map under `location` rather than
+          // `locations`; accept both shapes without stringifying the object.
+          const payloadLocations = normalizeSkuLocationsPayload(
+            item.locations ?? item.Locations ?? locationPayload
+          );
           const inventoryFields = extractSkuInventoryFields(item);
           const hasLegacyLocationPayload = !payloadWarehouseId && Object.keys(payloadLocations).length === 0 && rawLocation !== "";
           const hasWarehouseLocationPayload = !!payloadWarehouseId && rawLocation !== "";
