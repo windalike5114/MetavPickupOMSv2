@@ -3494,6 +3494,141 @@ async function startServer() {
     }
   });
 
+  // Field sales visit tracking
+  const canUseFieldVisits = (user: any) => {
+    const role = user?.roleTemplate || user?.role;
+    return role === "Sales" || role === "Admin" || SUPER_ADMINS.includes(String(user?.username || "").toLowerCase());
+  };
+
+  const normalizeVisitLocation = (value: any) => {
+    const latitude = Number(value?.latitude);
+    const longitude = Number(value?.longitude);
+    const accuracy = Number(value?.accuracy);
+    if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90 ||
+        !Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+      throw new Error("A valid GPS location is required");
+    }
+    return {
+      latitude,
+      longitude,
+      accuracy: Number.isFinite(accuracy) ? Math.max(0, Math.round(accuracy)) : null,
+      capturedAt: new Date().toISOString()
+    };
+  };
+
+  const normalizeVisitPhoto = (value: any, required = false) => {
+    if (!value && !required) return null;
+    if (typeof value !== "string" || !/^data:image\/(jpeg|png|webp);base64,/i.test(value)) {
+      throw new Error("A valid visit photo is required");
+    }
+    // Keep the complete Firestore document comfortably below its 1 MiB limit.
+    if (value.length > 700_000) throw new Error("Photo is too large; please capture a lower-resolution image");
+    return value;
+  };
+
+  app.get("/api/field-visits", authenticate, async (req: any, res) => {
+    const currentDb = await initDb();
+    if (!currentDb) return res.status(503).json({ success: false, error: "Database not initialized" });
+    if (!canUseFieldVisits(req.user)) return res.status(403).json({ success: false, error: "Sales access required" });
+
+    try {
+      const isAdminUser = (req.user.roleTemplate || req.user.role) === "Admin" ||
+        SUPER_ADMINS.includes(String(req.user.username || "").toLowerCase());
+      let query: any = currentDb.collection("field_visits");
+      if (!isAdminUser || req.query.mine === "true") query = query.where("salesUid", "==", req.user.uid);
+      const snapshot = await query.limit(100).get();
+      const visits = snapshot.docs
+        .map((doc: any) => {
+          const data = doc.data();
+          return { ...data, id: doc.id, hasPhoto: !!data.photoDataUrl, photoDataUrl: undefined };
+        })
+        .sort((a: any, b: any) => String(b.startedAt).localeCompare(String(a.startedAt)));
+      return res.json({ success: true, visits });
+    } catch (error: any) {
+      console.error("List Field Visits Error:", error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.post("/api/field-visits/check-in", authenticate, async (req: any, res) => {
+    const currentDb = await initDb();
+    if (!currentDb) return res.status(503).json({ success: false, error: "Database not initialized" });
+    if (!canUseFieldVisits(req.user)) return res.status(403).json({ success: false, error: "Sales access required" });
+
+    try {
+      const customerName = String(req.body?.customerName || "").trim();
+      if (!customerName) return res.status(400).json({ success: false, error: "Customer name is required" });
+
+      const activeSnapshot = await currentDb.collection("field_visits")
+        .where("salesUid", "==", req.user.uid)
+        .where("status", "==", "Active")
+        .limit(1)
+        .get();
+      if (!activeSnapshot.empty) {
+        return res.status(409).json({ success: false, error: "Finish the active visit before starting another" });
+      }
+
+      const now = new Date().toISOString();
+      const payload = {
+        customerName,
+        contactName: String(req.body?.contactName || "").trim() || null,
+        purpose: String(req.body?.purpose || "").trim() || null,
+        checkInLocation: normalizeVisitLocation(req.body?.location),
+        photoDataUrl: normalizeVisitPhoto(req.body?.photoDataUrl, true),
+        status: "Active",
+        salesUid: req.user.uid,
+        salesName: req.user.name || req.user.username,
+        salesUsername: req.user.username,
+        startedAt: now,
+        endedAt: null,
+        durationSeconds: null,
+        createdAt: now,
+        updatedAt: now
+      };
+      const visitRef = await currentDb.collection("field_visits").add(payload);
+      return res.json({ success: true, visit: { ...payload, id: visitRef.id, hasPhoto: true, photoDataUrl: undefined } });
+    } catch (error: any) {
+      return res.status(400).json({ success: false, error: error.message });
+    }
+  });
+
+  app.post("/api/field-visits/:id/check-out", authenticate, async (req: any, res) => {
+    const currentDb = await initDb();
+    if (!currentDb) return res.status(503).json({ success: false, error: "Database not initialized" });
+    if (!canUseFieldVisits(req.user)) return res.status(403).json({ success: false, error: "Sales access required" });
+
+    try {
+      const visitRef = currentDb.collection("field_visits").doc(req.params.id);
+      const result = await currentDb.runTransaction(async (tx) => {
+        const snapshot = await tx.get(visitRef);
+        if (!snapshot.exists) throw new Error("Visit not found");
+        const visit = snapshot.data() as any;
+        const isAdminUser = (req.user.roleTemplate || req.user.role) === "Admin" ||
+          SUPER_ADMINS.includes(String(req.user.username || "").toLowerCase());
+        if (visit.salesUid !== req.user.uid && !isAdminUser) throw new Error("You cannot finish another salesperson's visit");
+        if (visit.status !== "Active") throw new Error("Visit is already finished");
+
+        const endedAt = new Date().toISOString();
+        const durationSeconds = Math.max(0, Math.round((Date.parse(endedAt) - Date.parse(visit.startedAt)) / 1000));
+        const updateData = {
+          status: "Completed",
+          checkOutLocation: normalizeVisitLocation(req.body?.location),
+          endedAt,
+          durationSeconds,
+          summary: String(req.body?.summary || "").trim() || null,
+          outcome: String(req.body?.outcome || "Follow-up").trim(),
+          nextAction: String(req.body?.nextAction || "").trim() || null,
+          updatedAt: endedAt
+        };
+        tx.update(visitRef, updateData);
+        return { ...visit, ...updateData, id: snapshot.id, hasPhoto: !!visit.photoDataUrl, photoDataUrl: undefined };
+      });
+      return res.json({ success: true, visit: result });
+    } catch (error: any) {
+      return res.status(400).json({ success: false, error: error.message });
+    }
+  });
+
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const { createServer: createViteServer } = await import("vite");

@@ -22,6 +22,7 @@ import { PickingQueue } from './pages/PickingQueue';
 import { OverdueOrders } from './pages/OverdueOrders';
 import { CounterPickupListing } from './pages/CounterPickupListing';
 import { PutbackTasks } from './pages/PutbackTasks';
+import { FieldVisits } from './pages/FieldVisits';
 import { TaskProvider } from './components/TaskProvider';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { NotificationManager } from './components/NotificationManager';
@@ -158,6 +159,7 @@ export default function App() {
               <Route path="/picking-queue" element={<ProtectedRoute><PickingQueue /></ProtectedRoute>} />
               <Route path="/counter-pickups" element={<ProtectedRoute><CounterPickupListing /></ProtectedRoute>} />
               <Route path="/putback-tasks" element={<ProtectedRoute><PutbackTasks /></ProtectedRoute>} />
+              <Route path="/field-visits" element={<ProtectedRoute><FieldVisits /></ProtectedRoute>} />
               <Route path="/skus" element={<ProtectedRoute><SKUDatabase /></ProtectedRoute>} />
               <Route path="/skus/logs" element={<ProtectedRoute><SKULogs /></ProtectedRoute>} />
               <Route path="/history" element={<ProtectedRoute><Orders /></ProtectedRoute>} />
