@@ -540,22 +540,33 @@ export const FieldVisitReports: React.FC = () => {
                   loading="lazy"
                   referrerPolicy="no-referrer-when-downgrade"
                 />
-                <div className="absolute inset-0 bg-white/10" />
-                <div className="absolute left-5 top-5 rounded-2xl border border-white/70 bg-white/90 px-4 py-3 shadow-sm backdrop-blur">
+                <div className="pointer-events-none absolute inset-0 bg-white/10" />
+                <div className="pointer-events-none absolute left-5 top-5 rounded-2xl border border-white/70 bg-white/90 px-4 py-3 shadow-sm backdrop-blur">
                   <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">Date Range</p>
                   <p className="mt-1 text-sm font-black text-slate-800">
                     {startDate} to {endDate}
                   </p>
                 </div>
-                <div className="absolute right-5 top-5 rounded-2xl border border-white/70 bg-white/90 px-4 py-3 text-right shadow-sm backdrop-blur">
+                <div className="pointer-events-none absolute right-5 top-5 rounded-2xl border border-white/70 bg-white/90 px-4 py-3 text-right shadow-sm backdrop-blur">
                   <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">Map Mode</p>
                   <p className="mt-1 text-sm font-black text-slate-800">
                     {selectedVisit ? 'Selected Visit' : 'All Visible Visits'}
                   </p>
                 </div>
+                {selectedVisit && points.length > 1 && (
+                  <div className="absolute bottom-5 right-5 z-20">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedVisitId('')}
+                      className="rounded-2xl border border-white/80 bg-white/95 px-4 py-2.5 text-sm font-black text-slate-800 shadow-sm backdrop-blur transition-colors hover:bg-white"
+                    >
+                      Show All Visits
+                    </button>
+                  </div>
+                )}
 
                 {points.length === 0 ? (
-                  <div className="absolute inset-0 flex items-center justify-center p-6 text-center">
+                  <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-6 text-center">
                     <div className="rounded-3xl border border-slate-200 bg-white/95 p-8 shadow-sm">
                       <MapPin className="mx-auto h-9 w-9 text-slate-400" />
                       <p className="mt-3 font-black text-slate-800">No GPS visits in this range</p>
@@ -570,7 +581,7 @@ export const FieldVisitReports: React.FC = () => {
                       key={visit.id}
                       type="button"
                       onClick={() => setSelectedVisitId(visit.id)}
-                      className={`absolute z-10 -translate-x-1/2 -translate-y-1/2 rounded-full border-4 px-2.5 py-1.5 text-xs font-black shadow-lg transition-all hover:scale-105 ${
+                      className={`absolute z-10 -translate-x-1/2 -translate-y-1/2 rounded-full border-4 px-2.5 py-1.5 text-xs font-black shadow-lg transition-all hover:scale-105 pointer-events-auto ${
                         selectedVisit?.id === visit.id
                           ? 'border-indigo-900 bg-indigo-600 text-white'
                           : visit.status === 'Active'
