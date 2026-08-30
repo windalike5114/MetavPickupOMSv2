@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Camera, CheckCircle2, Clock3, LocateFixed, MapPin, Navigation, RefreshCw, Users } from 'lucide-react';
+import { Camera, CheckCircle2, Clock3, LocateFixed, MapPin, Navigation, RefreshCw, ShieldCheck, Users } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { useAuth } from '../components/AuthProvider';
 import { PageHeader } from '../components/PageHeader';
 
@@ -27,6 +28,8 @@ type FieldVisit = {
   salesName: string;
   hasPhoto?: boolean;
 };
+
+type LocationPermissionState = 'unknown' | 'prompt' | 'granted' | 'denied' | 'unsupported';
 
 const formatDuration = (seconds: number) => {
   const safe = Math.max(0, Math.floor(seconds));
@@ -93,13 +96,42 @@ export const FieldVisits: React.FC = () => {
   const [summary, setSummary] = useState('');
   const [outcome, setOutcome] = useState('Follow-up');
   const [nextAction, setNextAction] = useState('');
+  const [locationPermission, setLocationPermission] = useState<LocationPermissionState>('unknown');
 
   const activeVisit = useMemo(() => visits.find(visit => visit.status === 'Active'), [visits]);
   const completedVisits = useMemo(() => visits.filter(visit => visit.status === 'Completed'), [visits]);
+  const hasAccess = profile?.roleTemplate === 'Sales' || profile?.roleTemplate === 'Admin';
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
+  }, []);
+
+  const refreshLocationPermission = async () => {
+    if (!navigator.geolocation) {
+      setLocationPermission('unsupported');
+      return 'unsupported';
+    }
+
+    if (!navigator.permissions?.query) {
+      setLocationPermission('prompt');
+      return 'prompt';
+    }
+
+    try {
+      const permission = await navigator.permissions.query({ name: 'geolocation' as PermissionName });
+      const syncPermission = () => setLocationPermission(permission.state as LocationPermissionState);
+      syncPermission();
+      permission.onchange = syncPermission;
+      return permission.state as LocationPermissionState;
+    } catch {
+      setLocationPermission('prompt');
+      return 'prompt';
+    }
+  };
+
+  useEffect(() => {
+    refreshLocationPermission();
   }, []);
 
   const request = async (path: string, options: RequestInit = {}) => {
@@ -117,7 +149,7 @@ export const FieldVisits: React.FC = () => {
   };
 
   const loadVisits = async () => {
-    if (!token) return;
+    if (!token || !hasAccess) return;
     setLoading(true);
     setError('');
     try {
@@ -132,6 +164,29 @@ export const FieldVisits: React.FC = () => {
 
   useEffect(() => { loadVisits(); }, [token]);
 
+  if (!hasAccess) {
+    return (
+      <div className="flex h-full flex-col overflow-hidden bg-slate-50">
+        <PageHeader
+          title="Field Visits"
+          subtitle="GPS check-in, site photo and visit duration"
+          icon={MapPin}
+        />
+        <div className="flex flex-1 items-center justify-center p-6">
+          <div className="w-full max-w-xl rounded-3xl border border-slate-200 bg-white p-8 text-center shadow-sm">
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-100 text-slate-500">
+              <MapPin className="h-6 w-6" />
+            </div>
+            <h2 className="mt-4 text-2xl font-black text-slate-900">Field visit access required</h2>
+            <p className="mt-2 text-sm leading-relaxed text-slate-500">
+              This page is available to Sales and Admin accounts only.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   const handlePhoto = async (file?: File) => {
     if (!file) return;
     setError('');
@@ -142,6 +197,29 @@ export const FieldVisits: React.FC = () => {
     }
   };
 
+  const enableLocation = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      const permission = await refreshLocationPermission();
+      if (permission === 'unsupported') {
+        setError('This device does not support GPS location.');
+        return;
+      }
+      if (permission === 'denied') {
+        setError('Location is blocked for this website. Open browser site settings and allow Location for acapickup.com, then refresh the page.');
+        return;
+      }
+      await getLocation();
+      setLocationPermission('granted');
+    } catch (err: any) {
+      await refreshLocationPermission();
+      setError(err.message || 'Unable to request location permission.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const checkIn = async () => {
     if (!customerName.trim()) return setError('Enter the customer name.');
     if (!photoDataUrl) return setError('Take a site photo before checking in.');
@@ -149,6 +227,7 @@ export const FieldVisits: React.FC = () => {
     setError('');
     try {
       const location = await getLocation();
+      setLocationPermission('granted');
       const data = await request('/api/field-visits/check-in', {
         method: 'POST',
         body: JSON.stringify({ customerName, contactName, purpose, photoDataUrl, location })
@@ -159,6 +238,7 @@ export const FieldVisits: React.FC = () => {
       setPurpose('');
       setPhotoDataUrl('');
     } catch (err: any) {
+      await refreshLocationPermission();
       setError(err.message || 'Check-in failed.');
     } finally {
       setBusy(false);
@@ -172,6 +252,7 @@ export const FieldVisits: React.FC = () => {
     setError('');
     try {
       const location = await getLocation();
+      setLocationPermission('granted');
       const data = await request(`/api/field-visits/${activeVisit.id}/check-out`, {
         method: 'POST',
         body: JSON.stringify({ location, summary, outcome, nextAction })
@@ -181,6 +262,7 @@ export const FieldVisits: React.FC = () => {
       setOutcome('Follow-up');
       setNextAction('');
     } catch (err: any) {
+      await refreshLocationPermission();
       setError(err.message || 'Check-out failed.');
     } finally {
       setBusy(false);
@@ -196,9 +278,17 @@ export const FieldVisits: React.FC = () => {
         subtitle="GPS check-in, site photo and visit duration"
         icon={MapPin}
         actions={
-          <button onClick={loadVisits} disabled={loading} className="rounded-xl border border-slate-200 bg-white p-2.5 text-slate-600 hover:bg-slate-50">
-            <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Link
+              to="/field-visit-reports"
+              className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-700 transition-colors hover:bg-slate-50"
+            >
+              Open Reports
+            </Link>
+            <button onClick={loadVisits} disabled={loading} className="rounded-xl border border-slate-200 bg-white p-2.5 text-slate-600 hover:bg-slate-50">
+              <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+            </button>
+          </div>
         }
       />
 
@@ -223,6 +313,36 @@ export const FieldVisits: React.FC = () => {
             </div>
 
             {error && <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700">{error}</div>}
+
+            <div className="rounded-2xl border border-indigo-100 bg-white p-4 shadow-sm">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex items-start gap-3">
+                  <div className={`rounded-xl p-2 ${locationPermission === 'granted' ? 'bg-emerald-100 text-emerald-700' : locationPermission === 'denied' ? 'bg-red-100 text-red-700' : 'bg-indigo-100 text-indigo-700'}`}>
+                    <ShieldCheck className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-black text-slate-900">
+                      {locationPermission === 'granted' ? 'Location access enabled' : 'Location access required'}
+                    </p>
+                    <p className="mt-1 text-xs leading-relaxed text-slate-500">
+                      {locationPermission === 'denied'
+                        ? 'Your browser has blocked GPS for this site. Open site settings, allow Location, then refresh.'
+                        : locationPermission === 'unsupported'
+                        ? 'This device or browser does not support GPS location.'
+                        : 'Tap Enable Location before check-in so the browser can ask for GPS permission.'}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={enableLocation}
+                  disabled={busy || locationPermission === 'granted' || locationPermission === 'unsupported'}
+                  className="rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-black text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {locationPermission === 'granted' ? 'Enabled' : 'Enable Location'}
+                </button>
+              </div>
+            </div>
 
             {!activeVisit ? (
               <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm md:p-6">

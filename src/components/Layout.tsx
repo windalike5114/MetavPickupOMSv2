@@ -20,7 +20,8 @@ import {
   Clock,
   ShoppingCart,
   Mail,
-  MapPinned
+  MapPinned,
+  BarChart3
 } from 'lucide-react';
 import { useAuth } from './AuthProvider';
 import { hasPermission, isAdmin, isSystemAdmin } from '../utils';
@@ -59,6 +60,7 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
         { name: 'Overdue Audit', path: '/overdue', icon: Clock, visible: hasPermission(profile, 'Audit Overdue Orders', profile?.email) && profile?.roleTemplate !== 'Warehouse' },
         { name: 'SKU Database', path: '/skus', icon: Database, visible: hasPermission(profile, 'View SKU', profile?.email) && profile?.roleTemplate !== 'Warehouse' },
         { name: 'Field Visits', path: '/field-visits', icon: MapPinned, visible: profile?.roleTemplate === 'Sales' || profile?.roleTemplate === 'Admin' },
+        { name: 'Field Reports', path: '/field-visit-reports', icon: BarChart3, visible: profile?.roleTemplate === 'Sales' || profile?.roleTemplate === 'Admin' },
       ]
     },
     {

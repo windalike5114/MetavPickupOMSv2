@@ -3500,6 +3500,23 @@ async function startServer() {
     return role === "Sales" || role === "Admin" || SUPER_ADMINS.includes(String(user?.username || "").toLowerCase());
   };
 
+  const isFieldVisitAdmin = (user: any) => {
+    const role = user?.roleTemplate || user?.role;
+    return role === "Admin" || SUPER_ADMINS.includes(String(user?.username || "").toLowerCase());
+  };
+
+  const sanitizeFieldVisit = (doc: any) => {
+    const data = doc.data();
+    return { ...data, id: doc.id, hasPhoto: !!data.photoDataUrl, photoDataUrl: undefined };
+  };
+
+  const parseAucklandReportDay = (value: any, fallback: DateTime) => {
+    const raw = String(value || "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return fallback;
+    const parsed = DateTime.fromISO(raw, { zone: AUCKLAND_TIMEZONE });
+    return parsed.isValid ? parsed : fallback;
+  };
+
   const normalizeVisitLocation = (value: any) => {
     const latitude = Number(value?.latitude);
     const longitude = Number(value?.longitude);
@@ -3532,20 +3549,94 @@ async function startServer() {
     if (!canUseFieldVisits(req.user)) return res.status(403).json({ success: false, error: "Sales access required" });
 
     try {
-      const isAdminUser = (req.user.roleTemplate || req.user.role) === "Admin" ||
-        SUPER_ADMINS.includes(String(req.user.username || "").toLowerCase());
+      const isAdminUser = isFieldVisitAdmin(req.user);
       let query: any = currentDb.collection("field_visits");
       if (!isAdminUser || req.query.mine === "true") query = query.where("salesUid", "==", req.user.uid);
       const snapshot = await query.limit(100).get();
       const visits = snapshot.docs
-        .map((doc: any) => {
-          const data = doc.data();
-          return { ...data, id: doc.id, hasPhoto: !!data.photoDataUrl, photoDataUrl: undefined };
-        })
+        .map(sanitizeFieldVisit)
         .sort((a: any, b: any) => String(b.startedAt).localeCompare(String(a.startedAt)));
       return res.json({ success: true, visits });
     } catch (error: any) {
       console.error("List Field Visits Error:", error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.get("/api/field-visits/report", authenticate, async (req: any, res) => {
+    const currentDb = await initDb();
+    if (!currentDb) return res.status(503).json({ success: false, error: "Database not initialized" });
+    if (!canUseFieldVisits(req.user)) return res.status(403).json({ success: false, error: "Sales access required" });
+
+    try {
+      const nowAuckland = DateTime.now().setZone(AUCKLAND_TIMEZONE);
+      const defaultStart = nowAuckland.startOf("week");
+      const defaultEnd = nowAuckland.endOf("day");
+      let startDay = parseAucklandReportDay(req.query.start, defaultStart).startOf("day");
+      let endDay = parseAucklandReportDay(req.query.end, defaultEnd).endOf("day");
+      if (endDay < startDay) {
+        const swapStart = startDay;
+        startDay = endDay.startOf("day");
+        endDay = swapStart.endOf("day");
+      }
+      const isAdminUser = isFieldVisitAdmin(req.user);
+      const requestedSalesUid = String(req.query.salesUid || "").trim();
+      const targetSalesUid = !isAdminUser ? req.user.uid : requestedSalesUid && requestedSalesUid !== "all" ? requestedSalesUid : "";
+
+      let query: any = currentDb.collection("field_visits");
+      if (targetSalesUid) query = query.where("salesUid", "==", targetSalesUid);
+
+      const snapshot = await query.limit(isAdminUser && !targetSalesUid ? 1000 : 500).get();
+      const visits = snapshot.docs
+        .map(sanitizeFieldVisit)
+        .filter((visit: any) => {
+          const startedAt = DateTime.fromISO(String(visit.startedAt || ""), { zone: "utc" }).setZone(AUCKLAND_TIMEZONE);
+          return startedAt.isValid && startedAt >= startDay && startedAt <= endDay;
+        })
+        .sort((a: any, b: any) => String(b.startedAt).localeCompare(String(a.startedAt)));
+
+      const completedVisits = visits.filter((visit: any) => visit.status === "Completed");
+      const totalDurationSeconds = completedVisits.reduce((sum: number, visit: any) => sum + Number(visit.durationSeconds || 0), 0);
+      const salesMap = new Map<string, any>();
+      visits.forEach((visit: any) => {
+        const key = String(visit.salesUid || "unknown");
+        const current = salesMap.get(key) || {
+          salesUid: key,
+          salesName: visit.salesName || visit.salesUsername || "Unknown",
+          visitCount: 0,
+          completedCount: 0,
+          activeCount: 0,
+          totalDurationSeconds: 0
+        };
+        current.visitCount += 1;
+        current.completedCount += visit.status === "Completed" ? 1 : 0;
+        current.activeCount += visit.status === "Active" ? 1 : 0;
+        current.totalDurationSeconds += Number(visit.durationSeconds || 0);
+        salesMap.set(key, current);
+      });
+
+      return res.json({
+        success: true,
+        dateRange: {
+          start: startDay.toISODate(),
+          end: endDay.toISODate(),
+          timezone: AUCKLAND_TIMEZONE
+        },
+        stats: {
+          totalVisits: visits.length,
+          completedVisits: completedVisits.length,
+          activeVisits: visits.filter((visit: any) => visit.status === "Active").length,
+          uniqueCustomers: new Set(visits.map((visit: any) => String(visit.customerName || "").trim().toLowerCase()).filter(Boolean)).size,
+          totalDurationSeconds,
+          averageDurationSeconds: completedVisits.length ? Math.round(totalDurationSeconds / completedVisits.length) : 0,
+          withPhoto: visits.filter((visit: any) => visit.hasPhoto).length,
+          gpsVisits: visits.filter((visit: any) => Number.isFinite(Number(visit.checkInLocation?.latitude)) && Number.isFinite(Number(visit.checkInLocation?.longitude))).length
+        },
+        sales: Array.from(salesMap.values()).sort((a: any, b: any) => b.visitCount - a.visitCount),
+        visits
+      });
+    } catch (error: any) {
+      console.error("Field Visit Report Error:", error);
       return res.status(500).json({ success: false, error: error.message });
     }
   });
