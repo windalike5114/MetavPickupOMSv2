@@ -1,4 +1,4 @@
-import React, { useDeferredValue, useEffect, useMemo, useState } from 'react';
+import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import {
   BarChart3,
   CalendarDays,
@@ -120,25 +120,62 @@ const getMapUrl = (location?: VisitLocation | null) => {
   return `https://www.google.com/maps?q=${location.latitude},${location.longitude}`;
 };
 
-const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
-
-const getZoomFromBounds = (latSpan: number, lngSpan: number) => {
-  const span = Math.max(latSpan, lngSpan);
-  if (span <= 0.01) return 17;
-  if (span <= 0.03) return 15;
-  if (span <= 0.08) return 13;
-  if (span <= 0.18) return 12;
-  if (span <= 0.4) return 11;
-  if (span <= 0.8) return 10;
-  if (span <= 1.6) return 9;
-  if (span <= 3.2) return 8;
-  return 7;
+type LeafletLike = {
+  map: (...args: any[]) => any;
+  tileLayer: (...args: any[]) => any;
+  layerGroup: (...args: any[]) => any;
+  divIcon: (...args: any[]) => any;
+  marker: (...args: any[]) => any;
+  latLngBounds: (...args: any[]) => any;
 };
+
+declare global {
+  interface Window {
+    L?: LeafletLike;
+  }
+}
 
 const canUseFieldVisitReports = (roleTemplate?: string | null) => roleTemplate === 'Admin';
 
+const LEAFLET_CSS_ID = 'field-visit-leaflet-css';
+const LEAFLET_SCRIPT_ID = 'field-visit-leaflet-script';
+
+const ensureLeaflet = (): Promise<LeafletLike> =>
+  new Promise((resolve, reject) => {
+    if (window.L) {
+      resolve(window.L);
+      return;
+    }
+
+    if (!document.getElementById(LEAFLET_CSS_ID)) {
+      const link = document.createElement('link');
+      link.id = LEAFLET_CSS_ID;
+      link.rel = 'stylesheet';
+      link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+      document.head.appendChild(link);
+    }
+
+    const existingScript = document.getElementById(LEAFLET_SCRIPT_ID) as HTMLScriptElement | null;
+    if (existingScript) {
+      existingScript.addEventListener('load', () => resolve(window.L as LeafletLike), { once: true });
+      existingScript.addEventListener('error', () => reject(new Error('Unable to load map library.')), { once: true });
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.id = LEAFLET_SCRIPT_ID;
+    script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+    script.async = true;
+    script.onload = () => resolve(window.L as LeafletLike);
+    script.onerror = () => reject(new Error('Unable to load map library.'));
+    document.body.appendChild(script);
+  });
+
 export const FieldVisitReports: React.FC = () => {
   const { token, profile } = useAuth();
+  const mapContainerRef = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<any>(null);
+  const markerLayerRef = useRef<any>(null);
   const initialRange = useMemo(() => getPresetRange('thisWeek'), []);
   const [startDate, setStartDate] = useState(initialRange.start);
   const [endDate, setEndDate] = useState(initialRange.end);
@@ -151,6 +188,7 @@ export const FieldVisitReports: React.FC = () => {
   const [selectedVisitPhoto, setSelectedVisitPhoto] = useState<string>('');
   const [photoLoading, setPhotoLoading] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [mapLoading, setMapLoading] = useState(false);
   const [error, setError] = useState('');
 
   const deferredSearch = useDeferredValue(search);
@@ -207,19 +245,24 @@ export const FieldVisitReports: React.FC = () => {
     );
   }, [deferredSearch, visits]);
 
-  const selectedVisit = useMemo(() => {
-    if (!filteredVisits.length) return null;
-    return filteredVisits.find((visit) => visit.id === selectedVisitId) || filteredVisits[0];
-  }, [filteredVisits, selectedVisitId]);
+  const selectedVisit = useMemo(
+    () => filteredVisits.find((visit) => visit.id === selectedVisitId) || null,
+    [filteredVisits, selectedVisitId]
+  );
+
+  const detailVisit = useMemo(() => {
+    if (selectedVisit) return selectedVisit;
+    return filteredVisits[0] || null;
+  }, [filteredVisits, selectedVisit]);
 
   useEffect(() => {
-    if (!token || !selectedVisit?.id) {
+    if (!token || !detailVisit?.id) {
       setSelectedVisitPhoto('');
       setPhotoLoading(false);
       return;
     }
 
-    if (!selectedVisit.hasPhoto) {
+    if (!detailVisit.hasPhoto) {
       setSelectedVisitPhoto('');
       setPhotoLoading(false);
       return;
@@ -230,7 +273,7 @@ export const FieldVisitReports: React.FC = () => {
     const loadVisitPhoto = async () => {
       setPhotoLoading(true);
       try {
-        const response = await fetch(`/api/field-visits/${selectedVisit.id}`, {
+        const response = await fetch(`/api/field-visits/${detailVisit.id}`, {
           headers: { 'x-v2-auth-token': `Bearer ${token}` }
         });
         const data = await response.json();
@@ -251,7 +294,7 @@ export const FieldVisitReports: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [selectedVisit?.hasPhoto, selectedVisit?.id, token]);
+  }, [detailVisit?.hasPhoto, detailVisit?.id, token]);
 
   const points = useMemo(
     () =>
@@ -263,64 +306,105 @@ export const FieldVisitReports: React.FC = () => {
     [filteredVisits]
   );
 
-  const bounds = useMemo(() => {
+  useEffect(() => {
+    if (!hasAccess || !mapContainerRef.current || mapRef.current) return;
+
+    let cancelled = false;
+
+    const initMap = async () => {
+      setMapLoading(true);
+      try {
+        const L = await ensureLeaflet();
+        if (cancelled || !mapContainerRef.current) return;
+
+        const map = L.map(mapContainerRef.current, {
+          zoomControl: true,
+          scrollWheelZoom: true
+        }).setView([-41.2865, 174.7762], 5);
+
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+
+        const markerLayer = L.layerGroup().addTo(map);
+        mapRef.current = map;
+        markerLayerRef.current = markerLayer;
+      } catch (err: any) {
+        if (!cancelled) setError(err.message || 'Unable to initialize map.');
+      } finally {
+        if (!cancelled) setMapLoading(false);
+      }
+    };
+
+    initMap();
+
+    return () => {
+      cancelled = true;
+      if (mapRef.current) {
+        mapRef.current.remove();
+        mapRef.current = null;
+      }
+      markerLayerRef.current = null;
+    };
+  }, [hasAccess]);
+
+  useEffect(() => {
+    if (!mapRef.current || !markerLayerRef.current || !window.L) return;
+
+    const L = window.L;
+    const map = mapRef.current;
+    const markerLayer = markerLayerRef.current;
+    markerLayer.clearLayers();
+
     if (!points.length) {
-      return { minLat: -43, maxLat: -36, minLng: 172, maxLng: 175 };
+      map.setView([-41.2865, 174.7762], 5, { animate: true });
+      return;
     }
 
-    let minLat = Number(points[0].checkInLocation?.latitude);
-    let maxLat = minLat;
-    let minLng = Number(points[0].checkInLocation?.longitude);
-    let maxLng = minLng;
+    const latLngs = points.map((visit) => [
+      Number(visit.checkInLocation?.latitude),
+      Number(visit.checkInLocation?.longitude)
+    ]);
 
-    points.forEach((visit) => {
-      const lat = Number(visit.checkInLocation?.latitude);
-      const lng = Number(visit.checkInLocation?.longitude);
-      if (lat < minLat) minLat = lat;
-      if (lat > maxLat) maxLat = lat;
-      if (lng < minLng) minLng = lng;
-      if (lng > maxLng) maxLng = lng;
+    points.forEach((visit, index) => {
+      const isSelected = selectedVisit?.id === visit.id;
+      const statusClasses = isSelected
+        ? 'background:#4f46e5;border-color:#312e81;color:#fff;'
+        : visit.status === 'Active'
+        ? 'background:#ef4444;border-color:#fecaca;color:#fff;'
+        : 'background:#10b981;border-color:#ffffff;color:#fff;';
+
+      const icon = L.divIcon({
+        className: 'field-visit-marker',
+        html: `<div style="width:34px;height:34px;border-radius:9999px;border:4px solid;display:flex;align-items:center;justify-content:center;font-weight:900;font-size:12px;box-shadow:0 10px 25px rgba(15,23,42,.22);${statusClasses}">${index + 1}</div>`,
+        iconSize: [34, 34],
+        iconAnchor: [17, 17]
+      });
+
+      const marker = L.marker(
+        [Number(visit.checkInLocation?.latitude), Number(visit.checkInLocation?.longitude)],
+        { icon }
+      );
+      marker.on('click', () => setSelectedVisitId(visit.id));
+      marker.bindTooltip(`${visit.customerName} · ${visit.salesName}`, { direction: 'top' });
+      marker.addTo(markerLayer);
     });
 
-    const latPadding = Math.max((maxLat - minLat) * 0.18, 0.01);
-    const lngPadding = Math.max((maxLng - minLng) * 0.18, 0.01);
-
-    return {
-      minLat: minLat - latPadding,
-      maxLat: maxLat + latPadding,
-      minLng: minLng - lngPadding,
-      maxLng: maxLng + lngPadding
-    };
-  }, [points]);
-
-  const markerPosition = (visit: FieldVisit) => {
-    const lat = Number(visit.checkInLocation?.latitude);
-    const lng = Number(visit.checkInLocation?.longitude);
-    const x = ((lng - bounds.minLng) / Math.max(bounds.maxLng - bounds.minLng, 0.0001)) * 100;
-    const y = (1 - (lat - bounds.minLat) / Math.max(bounds.maxLat - bounds.minLat, 0.0001)) * 100;
-    return {
-      left: `${Math.min(95, Math.max(5, x))}%`,
-      top: `${Math.min(92, Math.max(8, y))}%`
-    };
-  };
-
-  const mapEmbedUrl = useMemo(() => {
-    const selectedLocation = selectedVisit?.checkInLocation;
-    if (selectedLocation && Number.isFinite(Number(selectedLocation.latitude)) && Number.isFinite(Number(selectedLocation.longitude))) {
-      const lat = clamp(Number(selectedLocation.latitude), -47.5, -33.5);
-      const lng = clamp(Number(selectedLocation.longitude), 165.5, 179.5);
-      return `https://maps.google.com/maps?q=${lat},${lng}&z=15&hl=en&output=embed`;
+    if (selectedVisit?.checkInLocation) {
+      map.flyTo(
+        [
+          Number(selectedVisit.checkInLocation.latitude),
+          Number(selectedVisit.checkInLocation.longitude)
+        ],
+        15,
+        { animate: true, duration: 0.8 }
+      );
+      return;
     }
 
-    if (points.length > 0) {
-      const centerLat = clamp((bounds.minLat + bounds.maxLat) / 2, -47.5, -33.5);
-      const centerLng = clamp((bounds.minLng + bounds.maxLng) / 2, 165.5, 179.5);
-      const zoom = getZoomFromBounds(bounds.maxLat - bounds.minLat, bounds.maxLng - bounds.minLng);
-      return `https://maps.google.com/maps?q=${centerLat},${centerLng}&z=${zoom}&hl=en&output=embed`;
-    }
-
-    return 'https://maps.google.com/maps?q=New%20Zealand&z=5&hl=en&output=embed';
-  }, [bounds.maxLat, bounds.maxLng, bounds.minLat, bounds.minLng, points.length, selectedVisit]);
+    const bounds = L.latLngBounds(latLngs);
+    map.fitBounds(bounds.pad(0.2), { animate: true, maxZoom: 13 });
+  }, [points, selectedVisit]);
 
   const setPreset = (preset: DatePreset) => {
     const range = getPresetRange(preset);
@@ -533,14 +617,8 @@ export const FieldVisitReports: React.FC = () => {
               </div>
 
               <div className="relative h-[520px] overflow-hidden bg-[linear-gradient(180deg,#f8fafc_0%,#eef2ff_100%)]">
-                <iframe
-                  title="Field visit map"
-                  src={mapEmbedUrl}
-                  className="absolute inset-0 h-full w-full border-0"
-                  loading="lazy"
-                  referrerPolicy="no-referrer-when-downgrade"
-                />
-                <div className="pointer-events-none absolute inset-0 bg-white/10" />
+                <div ref={mapContainerRef} className="absolute inset-0 h-full w-full" />
+                <div className="pointer-events-none absolute inset-0 bg-white/5" />
                 <div className="pointer-events-none absolute left-5 top-5 rounded-2xl border border-white/70 bg-white/90 px-4 py-3 shadow-sm backdrop-blur">
                   <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">Date Range</p>
                   <p className="mt-1 text-sm font-black text-slate-800">
@@ -565,6 +643,14 @@ export const FieldVisitReports: React.FC = () => {
                   </div>
                 )}
 
+                {mapLoading && (
+                  <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-white/60 backdrop-blur-[1px]">
+                    <div className="rounded-2xl border border-slate-200 bg-white px-5 py-3 text-sm font-bold text-slate-700 shadow-sm">
+                      Loading map...
+                    </div>
+                  </div>
+                )}
+
                 {points.length === 0 ? (
                   <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-6 text-center">
                     <div className="rounded-3xl border border-slate-200 bg-white/95 p-8 shadow-sm">
@@ -575,26 +661,7 @@ export const FieldVisitReports: React.FC = () => {
                       </p>
                     </div>
                   </div>
-                ) : (
-                  points.map((visit, index) => (
-                    <button
-                      key={visit.id}
-                      type="button"
-                      onClick={() => setSelectedVisitId(visit.id)}
-                      className={`absolute z-10 -translate-x-1/2 -translate-y-1/2 rounded-full border-4 px-2.5 py-1.5 text-xs font-black shadow-lg transition-all hover:scale-105 pointer-events-auto ${
-                        selectedVisit?.id === visit.id
-                          ? 'border-indigo-900 bg-indigo-600 text-white'
-                          : visit.status === 'Active'
-                          ? 'border-red-200 bg-red-500 text-white'
-                          : 'border-white bg-emerald-500 text-white'
-                      }`}
-                      style={markerPosition(visit)}
-                      title={`${visit.customerName} - ${visit.salesName}`}
-                    >
-                      {index + 1}
-                    </button>
-                  ))
-                )}
+                ) : null}
               </div>
             </section>
 
@@ -602,25 +669,25 @@ export const FieldVisitReports: React.FC = () => {
               <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
                 <div className="flex items-center justify-between">
                   <h2 className="text-lg font-black text-slate-900">Selected Visit</h2>
-                  {selectedVisit?.status && (
+                  {detailVisit?.status && (
                     <span
                       className={`rounded-xl px-3 py-1 text-xs font-black uppercase tracking-wide ${
-                        selectedVisit.status === 'Active'
+                        detailVisit.status === 'Active'
                           ? 'bg-red-100 text-red-700'
                           : 'bg-emerald-100 text-emerald-700'
                       }`}
                     >
-                      {selectedVisit.status}
+                      {detailVisit.status}
                     </span>
                   )}
                 </div>
 
-                {selectedVisit ? (
+                {detailVisit ? (
                   <div className="mt-4 space-y-4">
                     <div>
-                      <p className="text-2xl font-black text-slate-900">{selectedVisit.customerName}</p>
+                      <p className="text-2xl font-black text-slate-900">{detailVisit.customerName}</p>
                       <p className="mt-1 text-sm font-semibold text-slate-500">
-                        {selectedVisit.salesName} · {formatVisitTime(selectedVisit.startedAt)}
+                        {detailVisit.salesName} · {formatVisitTime(detailVisit.startedAt)}
                       </p>
                     </div>
 
@@ -628,24 +695,24 @@ export const FieldVisitReports: React.FC = () => {
                       <div className="rounded-2xl bg-slate-50 p-3">
                         <p className="text-xs font-bold text-slate-400">Duration</p>
                         <p className="mt-1 font-black text-slate-800">
-                          {formatDuration(selectedVisit.durationSeconds)}
+                          {formatDuration(detailVisit.durationSeconds)}
                         </p>
                       </div>
                       <div className="rounded-2xl bg-slate-50 p-3">
                         <p className="text-xs font-bold text-slate-400">Outcome</p>
                         <p className="mt-1 font-black text-slate-800">
-                          {selectedVisit.outcome || selectedVisit.status}
+                          {detailVisit.outcome || detailVisit.status}
                         </p>
                       </div>
                     </div>
 
-                    {selectedVisit.purpose && (
+                    {detailVisit.purpose && (
                       <div className="rounded-2xl bg-indigo-50 p-3 text-sm font-semibold text-indigo-800">
-                        Purpose: {selectedVisit.purpose}
+                        Purpose: {detailVisit.purpose}
                       </div>
                     )}
 
-                    {selectedVisit.hasPhoto && (
+                    {detailVisit.hasPhoto && (
                       <div className="overflow-hidden rounded-2xl border border-slate-200 bg-slate-50">
                         <div className="flex items-center justify-between border-b border-slate-200 px-3 py-2">
                           <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Visit Photo</p>
@@ -654,7 +721,7 @@ export const FieldVisitReports: React.FC = () => {
                         {selectedVisitPhoto ? (
                           <img
                             src={selectedVisitPhoto}
-                            alt={`${selectedVisit.customerName} visit evidence`}
+                            alt={`${detailVisit.customerName} visit evidence`}
                             className="h-56 w-full bg-white object-cover"
                           />
                         ) : (
@@ -665,21 +732,21 @@ export const FieldVisitReports: React.FC = () => {
                       </div>
                     )}
 
-                    {selectedVisit.summary && (
-                      <p className="text-sm leading-relaxed text-slate-600">{selectedVisit.summary}</p>
+                    {detailVisit.summary && (
+                      <p className="text-sm leading-relaxed text-slate-600">{detailVisit.summary}</p>
                     )}
 
-                    {selectedVisit.nextAction && (
+                    {detailVisit.nextAction && (
                       <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
                         <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Next Action</p>
                         <p className="mt-1 text-sm font-semibold text-slate-700">
-                          {selectedVisit.nextAction}
+                          {detailVisit.nextAction}
                         </p>
                       </div>
                     )}
 
                     <a
-                      href={getMapUrl(selectedVisit.checkInLocation)}
+                      href={getMapUrl(detailVisit.checkInLocation)}
                       target="_blank"
                       rel="noreferrer"
                       className="flex items-center justify-center gap-2 rounded-2xl bg-slate-900 px-4 py-3 text-sm font-black text-white transition-colors hover:bg-slate-800"
