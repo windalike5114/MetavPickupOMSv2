@@ -8,7 +8,6 @@ import {
   RefreshCw,
   Route,
   Search,
-  UserRound,
   Users
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
@@ -61,6 +60,12 @@ type SalesSummary = {
   completedCount: number;
   activeCount: number;
   totalDurationSeconds: number;
+};
+
+type VisitCluster = {
+  visits: FieldVisit[];
+  latitude: number;
+  longitude: number;
 };
 
 type DatePreset = 'today' | 'thisWeek' | 'lastWeek' | 'thisMonth';
@@ -139,6 +144,7 @@ const canUseFieldVisitReports = (roleTemplate?: string | null) => roleTemplate =
 
 const LEAFLET_CSS_ID = 'field-visit-leaflet-css';
 const LEAFLET_SCRIPT_ID = 'field-visit-leaflet-script';
+const VISIT_CLUSTER_DISTANCE_PX = 42;
 
 const ensureLeaflet = (): Promise<LeafletLike> =>
   new Promise((resolve, reject) => {
@@ -189,6 +195,8 @@ export const FieldVisitReports: React.FC = () => {
   const [photoLoading, setPhotoLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [mapLoading, setMapLoading] = useState(false);
+  const [mapFocusVersion, setMapFocusVersion] = useState(0);
+  const [mapZoomVersion, setMapZoomVersion] = useState(0);
   const [error, setError] = useState('');
 
   const deferredSearch = useDeferredValue(search);
@@ -213,10 +221,9 @@ export const FieldVisitReports: React.FC = () => {
       setVisits(nextVisits);
       setStats(data.stats || null);
       setSales(data.sales || []);
-      setSelectedVisitId((current) => {
-        if (current && nextVisits.some((visit: FieldVisit) => visit.id === current)) return current;
-        return nextVisits[0]?.id || '';
-      });
+      setSelectedVisitId((current) =>
+        current && nextVisits.some((visit: FieldVisit) => visit.id === current) ? current : ''
+      );
     } catch (err: any) {
       setError(err.message || 'Unable to load field visit report.');
     } finally {
@@ -254,6 +261,16 @@ export const FieldVisitReports: React.FC = () => {
     if (selectedVisit) return selectedVisit;
     return filteredVisits[0] || null;
   }, [filteredVisits, selectedVisit]);
+
+  const focusVisit = (visitId: string) => {
+    setSelectedVisitId(visitId);
+    setMapFocusVersion((previous) => previous + 1);
+  };
+
+  const showAllVisits = () => {
+    setSelectedVisitId('');
+    setMapFocusVersion((previous) => previous + 1);
+  };
 
   useEffect(() => {
     if (!token || !detailVisit?.id) {
@@ -306,6 +323,49 @@ export const FieldVisitReports: React.FC = () => {
     [filteredVisits]
   );
 
+  const buildVisitClusters = (map: any, visits: FieldVisit[]): VisitCluster[] => {
+    const zoom = typeof map.getZoom === 'function' ? map.getZoom() : 5;
+    const projectedVisits = visits.map((visit) => ({
+      visit,
+      point: map.project(
+        [
+          Number(visit.checkInLocation?.latitude),
+          Number(visit.checkInLocation?.longitude)
+        ],
+        zoom
+      )
+    }));
+
+    const clusters: VisitCluster[] = [];
+
+    projectedVisits.forEach(({ visit, point }) => {
+      const existingCluster = clusters.find((cluster) => {
+        const clusterPoint = map.project([cluster.latitude, cluster.longitude], zoom);
+        const dx = clusterPoint.x - point.x;
+        const dy = clusterPoint.y - point.y;
+        return Math.sqrt(dx * dx + dy * dy) <= VISIT_CLUSTER_DISTANCE_PX;
+      });
+
+      if (!existingCluster) {
+        clusters.push({
+          visits: [visit],
+          latitude: Number(visit.checkInLocation?.latitude),
+          longitude: Number(visit.checkInLocation?.longitude)
+        });
+        return;
+      }
+
+      existingCluster.visits.push(visit);
+      const clusterSize = existingCluster.visits.length;
+      existingCluster.latitude =
+        existingCluster.visits.reduce((sum, item) => sum + Number(item.checkInLocation?.latitude), 0) / clusterSize;
+      existingCluster.longitude =
+        existingCluster.visits.reduce((sum, item) => sum + Number(item.checkInLocation?.longitude), 0) / clusterSize;
+    });
+
+    return clusters;
+  };
+
   useEffect(() => {
     if (!hasAccess || !mapContainerRef.current || mapRef.current) return;
 
@@ -327,6 +387,9 @@ export const FieldVisitReports: React.FC = () => {
         }).addTo(map);
 
         const markerLayer = L.layerGroup().addTo(map);
+        map.on('zoomend', () => {
+          setMapZoomVersion((previous) => previous + 1);
+        });
         mapRef.current = map;
         markerLayerRef.current = markerLayer;
       } catch (err: any) {
@@ -366,27 +429,43 @@ export const FieldVisitReports: React.FC = () => {
       Number(visit.checkInLocation?.longitude)
     ]);
 
-    points.forEach((visit, index) => {
-      const isSelected = selectedVisit?.id === visit.id;
-      const statusClasses = isSelected
-        ? 'background:#4f46e5;border-color:#312e81;color:#fff;'
-        : visit.status === 'Active'
-        ? 'background:#ef4444;border-color:#fecaca;color:#fff;'
-        : 'background:#10b981;border-color:#ffffff;color:#fff;';
+    const clusters = buildVisitClusters(map, points);
 
+    clusters.forEach((cluster) => {
+      const containsSelectedVisit = !!selectedVisit && cluster.visits.some((visit) => visit.id === selectedVisit.id);
+      const hasActiveVisit = cluster.visits.some((visit) => visit.status === 'Active');
+      const isCluster = cluster.visits.length > 1;
+      const markerColor = containsSelectedVisit
+        ? '#4f46e5'
+        : hasActiveVisit
+        ? '#ef4444'
+        : '#10b981';
+      const borderColor = containsSelectedVisit ? '#312e81' : '#ffffff';
+      const markerSize = isCluster ? 42 : 20;
+      const markerLabel = isCluster ? String(cluster.visits.length) : '';
       const icon = L.divIcon({
         className: 'field-visit-marker',
-        html: `<div style="width:34px;height:34px;border-radius:9999px;border:4px solid;display:flex;align-items:center;justify-content:center;font-weight:900;font-size:12px;box-shadow:0 10px 25px rgba(15,23,42,.22);${statusClasses}">${index + 1}</div>`,
-        iconSize: [34, 34],
-        iconAnchor: [17, 17]
+        html: `<div style="width:${markerSize}px;height:${markerSize}px;border-radius:9999px;border:${isCluster ? 4 : 3}px solid ${borderColor};display:flex;align-items:center;justify-content:center;font-weight:900;font-size:${isCluster ? 13 : 0}px;color:#fff;box-shadow:0 10px 25px rgba(15,23,42,.22);background:${markerColor};">${markerLabel}</div>`,
+        iconSize: [markerSize, markerSize],
+        iconAnchor: [markerSize / 2, markerSize / 2]
       });
 
-      const marker = L.marker(
-        [Number(visit.checkInLocation?.latitude), Number(visit.checkInLocation?.longitude)],
-        { icon }
+      const marker = L.marker([cluster.latitude, cluster.longitude], { icon });
+      marker.on('click', () => {
+        if (!isCluster) {
+          focusVisit(cluster.visits[0].id);
+          return;
+        }
+        const currentIndex = selectedVisit ? cluster.visits.findIndex((visit) => visit.id === selectedVisit.id) : -1;
+        const nextVisit = cluster.visits[(currentIndex + 1 + cluster.visits.length) % cluster.visits.length];
+        focusVisit(nextVisit.id);
+      });
+      marker.bindTooltip(
+        isCluster
+          ? `${cluster.visits.length} visits in this area`
+          : `${cluster.visits[0].customerName} · ${cluster.visits[0].salesName}`,
+        { direction: 'top' }
       );
-      marker.on('click', () => setSelectedVisitId(visit.id));
-      marker.bindTooltip(`${visit.customerName} · ${visit.salesName}`, { direction: 'top' });
       marker.addTo(markerLayer);
     });
 
@@ -404,7 +483,7 @@ export const FieldVisitReports: React.FC = () => {
 
     const bounds = L.latLngBounds(latLngs);
     map.fitBounds(bounds.pad(0.2), { animate: true, maxZoom: 13 });
-  }, [points, selectedVisit]);
+  }, [mapFocusVersion, mapZoomVersion, points, selectedVisit]);
 
   const setPreset = (preset: DatePreset) => {
     const range = getPresetRange(preset);
@@ -527,71 +606,36 @@ export const FieldVisitReports: React.FC = () => {
             />
           </div>
 
-          {isAdmin ? (
-            <select
-              value={salesUid}
-              onChange={(e) => setSalesUid(e.target.value)}
-              className="rounded-3xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 shadow-sm outline-none focus:border-indigo-500"
-            >
-              <option value="all">All salespeople</option>
-              {sales.map((person) => (
-                <option key={person.salesUid} value={person.salesUid}>
-                  {person.salesName}
-                </option>
-              ))}
-            </select>
-          ) : (
-            <div className="flex items-center rounded-3xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
-              <div className="rounded-xl bg-indigo-100 p-2 text-indigo-700">
-                <UserRound className="h-4 w-4" />
-              </div>
-              <div className="ml-3">
-                <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Viewing</p>
-                <p className="text-sm font-black text-slate-900">{profile?.name || profile?.username}</p>
-              </div>
-            </div>
-          )}
+          <select
+            value={salesUid}
+            onChange={(e) => setSalesUid(e.target.value)}
+            className="rounded-3xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 shadow-sm outline-none focus:border-indigo-500"
+          >
+            <option value="all">All salespeople</option>
+            {sales.map((person) => (
+              <option key={person.salesUid} value={person.salesUid}>
+                {person.salesName}
+              </option>
+            ))}
+          </select>
         </div>
       </PageHeader>
 
-      <div className="flex-1 overflow-y-auto p-4 md:p-6">
-        <div className="mx-auto max-w-[1700px] space-y-5">
+      <div className="flex-1 overflow-hidden p-4 md:p-6">
+        <div className="mx-auto flex h-full max-w-[1700px] flex-col gap-4">
           {error && (
             <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-bold text-red-700">
               {error}
             </div>
           )}
 
-          <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-              <div>
-                <p className="text-xs font-black uppercase tracking-[0.22em] text-slate-400">Visit Summary</p>
-                <h2 className="mt-2 text-2xl font-black tracking-tight text-slate-900">
-                  Review fieldwork by route, customer and salesperson
-                </h2>
-                <p className="mt-1 text-sm text-slate-500">
-                  GPS points come from check-in records and stay read-only here.
-                </p>
-              </div>
-              <div className="relative w-full lg:w-96">
-                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                <input
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Search customer, purpose, summary..."
-                  className="w-full rounded-2xl border border-slate-200 bg-slate-50 py-3 pl-10 pr-4 text-sm outline-none focus:border-indigo-500 focus:bg-white"
-                />
-              </div>
-            </div>
-          </section>
-
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <div className="grid flex-shrink-0 gap-4 md:grid-cols-2 xl:grid-cols-[repeat(4,minmax(0,1fr))_minmax(300px,1.15fr)]">
             {statCards.map((card) => (
-              <section key={card.label} className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+              <section key={card.label} className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">{card.label}</p>
-                    <p className="mt-3 text-3xl font-black tracking-tight text-slate-900">{card.value}</p>
+                    <p className="mt-2 text-2xl font-black tracking-tight text-slate-900">{card.value}</p>
                     <p className="mt-1 text-sm text-slate-500">{card.helper}</p>
                   </div>
                   <div className={`rounded-2xl p-3 ${card.accent}`}>
@@ -600,10 +644,22 @@ export const FieldVisitReports: React.FC = () => {
                 </div>
               </section>
             ))}
+            <section className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
+              <div className="relative h-full">
+                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search customer, purpose, summary..."
+                  className="h-full min-h-[72px] w-full rounded-2xl border border-slate-200 bg-slate-50 py-3 pl-10 pr-4 text-sm outline-none focus:border-indigo-500 focus:bg-white"
+                />
+              </div>
+            </section>
           </div>
 
-          <div className="grid gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(360px,.65fr)]">
-            <section className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+          <div className="grid min-h-0 flex-1 gap-4 grid-rows-[minmax(300px,1.05fr)_minmax(220px,.95fr)]">
+            <div className="grid min-h-0 gap-4 xl:grid-cols-[minmax(0,1.45fr)_360px]">
+            <section className="flex min-h-0 flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
               <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
                 <div>
                   <h2 className="text-lg font-black text-slate-900">Visit Map</h2>
@@ -616,7 +672,7 @@ export const FieldVisitReports: React.FC = () => {
                 </div>
               </div>
 
-              <div className="relative h-[520px] overflow-hidden bg-[linear-gradient(180deg,#f8fafc_0%,#eef2ff_100%)]">
+              <div className="relative min-h-0 flex-1 overflow-hidden bg-[linear-gradient(180deg,#f8fafc_0%,#eef2ff_100%)]">
                 <div ref={mapContainerRef} className="absolute inset-0 h-full w-full" />
                 <div className="pointer-events-none absolute inset-0 bg-white/5" />
                 <div className="pointer-events-none absolute left-5 top-5 rounded-2xl border border-white/70 bg-white/90 px-4 py-3 shadow-sm backdrop-blur">
@@ -631,11 +687,11 @@ export const FieldVisitReports: React.FC = () => {
                     {selectedVisit ? 'Selected Visit' : 'All Visible Visits'}
                   </p>
                 </div>
-                {selectedVisit && points.length > 1 && (
+                {points.length > 1 && (
                   <div className="absolute bottom-5 right-5 z-20">
                     <button
                       type="button"
-                      onClick={() => setSelectedVisitId('')}
+                      onClick={showAllVisits}
                       className="rounded-2xl border border-white/80 bg-white/95 px-4 py-2.5 text-sm font-black text-slate-800 shadow-sm backdrop-blur transition-colors hover:bg-white"
                     >
                       Show All Visits
@@ -665,8 +721,8 @@ export const FieldVisitReports: React.FC = () => {
               </div>
             </section>
 
-            <aside className="space-y-5">
-              <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+            <aside className="min-h-0">
+              <section className="flex h-full min-h-0 flex-col rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
                 <div className="flex items-center justify-between">
                   <h2 className="text-lg font-black text-slate-900">Selected Visit</h2>
                   {detailVisit?.status && (
@@ -683,7 +739,7 @@ export const FieldVisitReports: React.FC = () => {
                 </div>
 
                 {detailVisit ? (
-                  <div className="mt-4 space-y-4">
+                  <div className="mt-4 space-y-4 overflow-y-auto pr-1">
                     <div>
                       <p className="text-2xl font-black text-slate-900">{detailVisit.customerName}</p>
                       <p className="mt-1 text-sm font-semibold text-slate-500">
@@ -760,61 +816,10 @@ export const FieldVisitReports: React.FC = () => {
                   </p>
                 )}
               </section>
-
-              {isAdmin && (
-                <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-                  <div className="flex items-center justify-between">
-                    <h2 className="text-lg font-black text-slate-900">Sales Summary</h2>
-                    {salesUid !== 'all' && (
-                      <button
-                        type="button"
-                        onClick={() => setSalesUid('all')}
-                        className="text-xs font-black uppercase tracking-wide text-indigo-600"
-                      >
-                        Clear
-                      </button>
-                    )}
-                  </div>
-                  <div className="mt-4 space-y-3">
-                    {sales.length === 0 ? (
-                      <p className="py-6 text-center text-sm text-slate-400">
-                        No sales activity in this range.
-                      </p>
-                    ) : (
-                      sales.map((person) => (
-                        <button
-                          key={person.salesUid}
-                          onClick={() => setSalesUid(person.salesUid)}
-                          className={`flex w-full items-center justify-between rounded-2xl border p-3 text-left transition-colors ${
-                            salesUid === person.salesUid
-                              ? 'border-indigo-200 bg-indigo-50'
-                              : 'border-slate-100 bg-slate-50 hover:border-indigo-200 hover:bg-indigo-50'
-                          }`}
-                        >
-                          <div className="flex items-center gap-3">
-                            <div className="rounded-xl bg-white p-2 text-indigo-600">
-                              <UserRound className="h-4 w-4" />
-                            </div>
-                            <div>
-                              <p className="font-black text-slate-900">{person.salesName}</p>
-                              <p className="text-xs text-slate-500">
-                                {person.completedCount} completed · {formatDuration(person.totalDurationSeconds)}
-                              </p>
-                            </div>
-                          </div>
-                          <span className="rounded-xl bg-white px-3 py-1 text-sm font-black text-slate-700">
-                            {person.visitCount}
-                          </span>
-                        </button>
-                      ))
-                    )}
-                  </div>
-                </section>
-              )}
             </aside>
-          </div>
+            </div>
 
-          <section className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+          <section className="flex min-h-0 flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
             <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
               <div>
                 <h2 className="text-lg font-black text-slate-900">Visit Records</h2>
@@ -825,7 +830,7 @@ export const FieldVisitReports: React.FC = () => {
               <CalendarDays className="h-5 w-5 text-slate-400" />
             </div>
 
-            <div className="overflow-x-auto">
+            <div className="min-h-0 flex-1 overflow-auto">
               <table className="w-full min-w-[980px] text-left text-sm">
                 <thead className="bg-slate-50 text-xs font-black uppercase tracking-wider text-slate-400">
                   <tr>
@@ -858,7 +863,7 @@ export const FieldVisitReports: React.FC = () => {
                         className={`cursor-pointer transition-colors hover:bg-slate-50 ${
                           selectedVisit?.id === visit.id ? 'bg-indigo-50/60' : ''
                         }`}
-                        onClick={() => setSelectedVisitId(visit.id)}
+                        onClick={() => focusVisit(visit.id)}
                       >
                         <td className="px-4 py-4">
                           <p className="font-black text-slate-900">{visit.customerName}</p>
@@ -895,6 +900,7 @@ export const FieldVisitReports: React.FC = () => {
               </table>
             </div>
           </section>
+          </div>
         </div>
       </div>
     </div>

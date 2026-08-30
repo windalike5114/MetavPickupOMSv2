@@ -3530,6 +3530,27 @@ async function startServer() {
     };
   };
 
+  const VISIT_CHECKOUT_MAX_DISTANCE_METERS = 250;
+
+  const calculateVisitDistanceMeters = (from: any, to: any) => {
+    const toRadians = (value: number) => value * (Math.PI / 180);
+    const latitude1 = Number(from?.latitude);
+    const longitude1 = Number(from?.longitude);
+    const latitude2 = Number(to?.latitude);
+    const longitude2 = Number(to?.longitude);
+    const earthRadius = 6371000;
+    const deltaLatitude = toRadians(latitude2 - latitude1);
+    const deltaLongitude = toRadians(longitude2 - longitude1);
+    const a =
+      Math.sin(deltaLatitude / 2) * Math.sin(deltaLatitude / 2) +
+      Math.cos(toRadians(latitude1)) *
+        Math.cos(toRadians(latitude2)) *
+        Math.sin(deltaLongitude / 2) *
+        Math.sin(deltaLongitude / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return Math.round(earthRadius * c);
+  };
+
   const normalizeVisitPhoto = (value: any, required = false) => {
     if (!value && !required) return null;
     if (typeof value !== "string" || !/^data:image\/(jpeg|png|webp);base64,/i.test(value)) {
@@ -3716,6 +3737,8 @@ async function startServer() {
 
     try {
       const visitRef = currentDb.collection("field_visits").doc(req.params.id);
+      const allowRemoteCheckout = !!req.body?.allowRemoteCheckout;
+      const exceptionReason = String(req.body?.exceptionReason || "").trim();
       const result = await currentDb.runTransaction(async (tx) => {
         const snapshot = await tx.get(visitRef);
         if (!snapshot.exists) throw new Error("Visit not found");
@@ -3725,16 +3748,38 @@ async function startServer() {
         if (visit.salesUid !== req.user.uid && !isAdminUser) throw new Error("You cannot finish another salesperson's visit");
         if (visit.status !== "Active") throw new Error("Visit is already finished");
 
+        const checkOutLocation = normalizeVisitLocation(req.body?.location);
+        const checkoutDistanceMeters = calculateVisitDistanceMeters(visit.checkInLocation, checkOutLocation);
+        if (checkoutDistanceMeters > VISIT_CHECKOUT_MAX_DISTANCE_METERS && !allowRemoteCheckout) {
+          const proximityError: any = new Error("You are too far from the original check-in point.");
+          proximityError.statusCode = 409;
+          proximityError.errorCode = "VISIT_CHECKOUT_TOO_FAR";
+          proximityError.details = {
+            checkoutDistanceMeters,
+            allowedDistanceMeters: VISIT_CHECKOUT_MAX_DISTANCE_METERS
+          };
+          throw proximityError;
+        }
+        if (allowRemoteCheckout && exceptionReason.length < 8) {
+          const reasonError: any = new Error("Provide a short reason for remote check-out.");
+          reasonError.statusCode = 400;
+          reasonError.errorCode = "VISIT_REMOTE_REASON_REQUIRED";
+          throw reasonError;
+        }
+
         const endedAt = new Date().toISOString();
         const durationSeconds = Math.max(0, Math.round((Date.parse(endedAt) - Date.parse(visit.startedAt)) / 1000));
         const updateData = {
           status: "Completed",
-          checkOutLocation: normalizeVisitLocation(req.body?.location),
+          checkOutLocation,
           endedAt,
           durationSeconds,
           summary: String(req.body?.summary || "").trim() || null,
           outcome: String(req.body?.outcome || "Follow-up").trim(),
           nextAction: String(req.body?.nextAction || "").trim() || null,
+          checkoutDistanceMeters,
+          checkoutMode: allowRemoteCheckout ? "RemoteOverride" : "OnSite",
+          checkoutExceptionReason: allowRemoteCheckout ? exceptionReason : null,
           updatedAt: endedAt
         };
         tx.update(visitRef, updateData);
@@ -3742,7 +3787,12 @@ async function startServer() {
       });
       return res.json({ success: true, visit: result });
     } catch (error: any) {
-      return res.status(400).json({ success: false, error: error.message });
+      return res.status(error?.statusCode || 400).json({
+        success: false,
+        error: error.message,
+        code: error?.errorCode || null,
+        details: error?.details || null
+      });
     }
   });
 

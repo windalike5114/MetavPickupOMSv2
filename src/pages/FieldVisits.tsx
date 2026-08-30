@@ -27,6 +27,9 @@ type FieldVisit = {
   nextAction?: string | null;
   salesName: string;
   hasPhoto?: boolean;
+  checkoutDistanceMeters?: number | null;
+  checkoutMode?: 'OnSite' | 'RemoteOverride';
+  checkoutExceptionReason?: string | null;
 };
 
 type LocationPermissionState = 'unknown' | 'prompt' | 'granted' | 'denied' | 'unsupported';
@@ -96,11 +99,15 @@ export const FieldVisits: React.FC = () => {
   const [summary, setSummary] = useState('');
   const [outcome, setOutcome] = useState('Follow-up');
   const [nextAction, setNextAction] = useState('');
+  const [checkoutExceptionReason, setCheckoutExceptionReason] = useState('');
+  const [showRemoteCheckout, setShowRemoteCheckout] = useState(false);
+  const [checkoutDistanceHint, setCheckoutDistanceHint] = useState<{ distance: number; allowed: number } | null>(null);
   const [locationPermission, setLocationPermission] = useState<LocationPermissionState>('unknown');
 
   const activeVisit = useMemo(() => visits.find(visit => visit.status === 'Active'), [visits]);
   const completedVisits = useMemo(() => visits.filter(visit => visit.status === 'Completed'), [visits]);
   const hasAccess = !!profile;
+  const canViewReports = profile?.roleTemplate === 'Admin';
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -144,7 +151,12 @@ export const FieldVisits: React.FC = () => {
       }
     });
     const data = await response.json();
-    if (!response.ok || !data.success) throw new Error(data.error || 'Request failed');
+    if (!response.ok || !data.success) {
+      const error: any = new Error(data.error || 'Request failed');
+      error.code = data.code;
+      error.details = data.details;
+      throw error;
+    }
     return data;
   };
 
@@ -237,6 +249,9 @@ export const FieldVisits: React.FC = () => {
       setContactName('');
       setPurpose('');
       setPhotoDataUrl('');
+      setShowRemoteCheckout(false);
+      setCheckoutExceptionReason('');
+      setCheckoutDistanceHint(null);
     } catch (err: any) {
       await refreshLocationPermission();
       setError(err.message || 'Check-in failed.');
@@ -245,9 +260,12 @@ export const FieldVisits: React.FC = () => {
     }
   };
 
-  const checkOut = async () => {
+  const runCheckOut = async (allowRemoteCheckout = false) => {
     if (!activeVisit) return;
     if (!summary.trim()) return setError('Add a short visit summary before checking out.');
+    if (allowRemoteCheckout && checkoutExceptionReason.trim().length < 8) {
+      return setError('Enter a short reason before using remote check-out.');
+    }
     setBusy(true);
     setError('');
     try {
@@ -255,19 +273,41 @@ export const FieldVisits: React.FC = () => {
       setLocationPermission('granted');
       const data = await request(`/api/field-visits/${activeVisit.id}/check-out`, {
         method: 'POST',
-        body: JSON.stringify({ location, summary, outcome, nextAction })
+        body: JSON.stringify({
+          location,
+          summary,
+          outcome,
+          nextAction,
+          allowRemoteCheckout,
+          exceptionReason: allowRemoteCheckout ? checkoutExceptionReason : ''
+        })
       });
       setVisits(previous => previous.map(visit => visit.id === activeVisit.id ? data.visit : visit));
       setSummary('');
       setOutcome('Follow-up');
       setNextAction('');
+      setShowRemoteCheckout(false);
+      setCheckoutExceptionReason('');
+      setCheckoutDistanceHint(null);
     } catch (err: any) {
       await refreshLocationPermission();
-      setError(err.message || 'Check-out failed.');
+      if (err.code === 'VISIT_CHECKOUT_TOO_FAR') {
+        const distance = Number(err?.details?.checkoutDistanceMeters || 0);
+        const allowed = Number(err?.details?.allowedDistanceMeters || 0);
+        setCheckoutDistanceHint({ distance, allowed });
+        setShowRemoteCheckout(true);
+        setError(`You are ${distance}m away from check-in. Move back within ${allowed}m, or use remote check-out with a reason.`);
+      } else {
+        setError(err.message || 'Check-out failed.');
+      }
     } finally {
       setBusy(false);
     }
   };
+
+  const checkOut = async () => runCheckOut(false);
+
+  const remoteCheckOut = async () => runCheckOut(true);
 
   const elapsed = activeVisit ? Math.floor((now - Date.parse(activeVisit.startedAt)) / 1000) : 0;
 
@@ -279,12 +319,14 @@ export const FieldVisits: React.FC = () => {
         icon={MapPin}
         actions={
           <div className="flex flex-wrap items-center gap-2">
-            <Link
-              to="/field-visit-reports"
-              className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-700 transition-colors hover:bg-slate-50"
-            >
-              Open Reports
-            </Link>
+            {canViewReports && (
+              <Link
+                to="/field-visit-reports"
+                className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-700 transition-colors hover:bg-slate-50"
+              >
+                Open Reports
+              </Link>
+            )}
             <button onClick={loadVisits} disabled={loading} className="rounded-xl border border-slate-200 bg-white p-2.5 text-slate-600 hover:bg-slate-50">
               <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
             </button>
@@ -295,18 +337,18 @@ export const FieldVisits: React.FC = () => {
       <div className="flex-1 overflow-y-auto p-4 md:p-6">
         <div className="mx-auto grid max-w-6xl gap-5 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,.95fr)]">
           <section className="space-y-5">
-            <div className="rounded-3xl bg-gradient-to-br from-indigo-600 to-blue-700 p-6 text-white shadow-xl shadow-indigo-100">
+            <div className="rounded-3xl bg-gradient-to-br from-indigo-600 to-blue-700 p-5 text-white shadow-xl shadow-indigo-100">
               <div className="flex items-center justify-between gap-4">
                 <div>
                   <p className="text-xs font-bold uppercase tracking-[0.22em] text-indigo-200">Sales fieldwork</p>
-                  <h2 className="mt-2 text-2xl font-black">{activeVisit ? activeVisit.customerName : 'Ready for your next visit'}</h2>
+                  <h2 className="mt-2 text-xl font-black">{activeVisit ? activeVisit.customerName : 'Ready for your next visit'}</h2>
                   <p className="mt-1 text-sm text-indigo-100">{profile?.name || profile?.username}</p>
                 </div>
                 <div className="rounded-2xl bg-white/15 p-4 backdrop-blur"><Navigation className="h-8 w-8" /></div>
               </div>
               {activeVisit && (
                 <div className="mt-6 flex items-end justify-between rounded-2xl border border-white/20 bg-black/10 p-4">
-                  <div><p className="text-xs text-indigo-100">Visit duration</p><p className="mt-1 font-mono text-3xl font-black tracking-tight">{formatDuration(elapsed)}</p></div>
+                  <div><p className="text-xs text-indigo-100">Visit duration</p><p className="mt-1 font-mono text-2xl font-black tracking-tight">{formatDuration(elapsed)}</p></div>
                   <div className="flex items-center gap-2 text-xs text-indigo-100"><span className="h-2.5 w-2.5 animate-pulse rounded-full bg-emerald-300" />Active</div>
                 </div>
               )}
@@ -366,12 +408,55 @@ export const FieldVisits: React.FC = () => {
             ) : (
               <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm md:p-6">
                 <div className="flex items-center gap-3"><div className="rounded-xl bg-emerald-100 p-2 text-emerald-700"><Clock3 className="h-5 w-5" /></div><div><h3 className="font-black text-slate-900">Complete visit</h3><p className="text-xs text-slate-500">Checked in {new Date(activeVisit.startedAt).toLocaleString()}</p></div></div>
+                <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-semibold text-amber-800">
+                  Standard check-out must happen within 250m of the original check-in location.
+                </div>
                 <label className="mt-5 block"><span className="mb-1.5 block text-xs font-bold text-slate-600">Visit summary *</span><textarea value={summary} onChange={e => setSummary(e.target.value)} rows={4} className="w-full rounded-xl border border-slate-200 px-4 py-3 outline-none focus:border-indigo-500" placeholder="What was discussed and agreed?" /></label>
                 <div className="mt-4 grid gap-4 sm:grid-cols-2">
                   <label><span className="mb-1.5 block text-xs font-bold text-slate-600">Outcome</span><select value={outcome} onChange={e => setOutcome(e.target.value)} className="w-full rounded-xl border border-slate-200 px-4 py-3"><option>Follow-up</option><option>Quote requested</option><option>Opportunity</option><option>Order expected</option><option>No opportunity</option></select></label>
                   <label><span className="mb-1.5 block text-xs font-bold text-slate-600">Next action</span><input value={nextAction} onChange={e => setNextAction(e.target.value)} className="w-full rounded-xl border border-slate-200 px-4 py-3" placeholder="Call next Tuesday" /></label>
                 </div>
                 <button onClick={checkOut} disabled={busy} className="mt-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-emerald-600 px-5 py-4 font-black text-white shadow-lg shadow-emerald-200 hover:bg-emerald-700 disabled:opacity-60"><CheckCircle2 className="h-5 w-5" />{busy ? 'Getting location...' : 'GPS Check Out'}</button>
+                {(showRemoteCheckout || checkoutDistanceHint) && (
+                  <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-black text-slate-900">Remote check-out exception</p>
+                        <p className="mt-1 text-xs leading-relaxed text-slate-500">
+                          {checkoutDistanceHint
+                            ? `Current distance: ${checkoutDistanceHint.distance}m. Allowed distance: ${checkoutDistanceHint.allowed}m.`
+                            : 'Use this only when check-out cannot happen near the original check-in point.'}
+                        </p>
+                      </div>
+                      <button type="button" onClick={() => setShowRemoteCheckout(previous => !previous)} className="text-xs font-black uppercase tracking-wide text-indigo-600">
+                        {showRemoteCheckout ? 'Hide' : 'Show'}
+                      </button>
+                    </div>
+                    {showRemoteCheckout && (
+                      <div className="mt-4 space-y-3">
+                        <label className="block">
+                          <span className="mb-1.5 block text-xs font-bold text-slate-600">Exception reason *</span>
+                          <textarea
+                            value={checkoutExceptionReason}
+                            onChange={e => setCheckoutExceptionReason(e.target.value)}
+                            rows={3}
+                            className="w-full rounded-xl border border-slate-200 px-4 py-3 outline-none focus:border-indigo-500"
+                            placeholder="Why could the visit not be checked out near the original check-in point?"
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          onClick={remoteCheckOut}
+                          disabled={busy}
+                          className="flex w-full items-center justify-center gap-2 rounded-2xl border border-slate-300 bg-white px-5 py-3 font-black text-slate-800 shadow-sm hover:bg-slate-100 disabled:opacity-60"
+                        >
+                          <CheckCircle2 className="h-5 w-5" />
+                          {busy ? 'Getting location...' : 'Remote Check Out'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </section>
