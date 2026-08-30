@@ -40,6 +40,7 @@ type FieldVisit = {
   salesName: string;
   salesUsername?: string;
   hasPhoto?: boolean;
+  photoDataUrl?: string;
 };
 
 type FieldVisitStats = {
@@ -119,7 +120,22 @@ const getMapUrl = (location?: VisitLocation | null) => {
   return `https://www.google.com/maps?q=${location.latitude},${location.longitude}`;
 };
 
-const canUseFieldVisits = (roleTemplate?: string | null) => roleTemplate === 'Sales' || roleTemplate === 'Admin';
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+
+const getZoomFromBounds = (latSpan: number, lngSpan: number) => {
+  const span = Math.max(latSpan, lngSpan);
+  if (span <= 0.01) return 17;
+  if (span <= 0.03) return 15;
+  if (span <= 0.08) return 13;
+  if (span <= 0.18) return 12;
+  if (span <= 0.4) return 11;
+  if (span <= 0.8) return 10;
+  if (span <= 1.6) return 9;
+  if (span <= 3.2) return 8;
+  return 7;
+};
+
+const canUseFieldVisitReports = (roleTemplate?: string | null) => roleTemplate === 'Admin';
 
 export const FieldVisitReports: React.FC = () => {
   const { token, profile } = useAuth();
@@ -132,12 +148,14 @@ export const FieldVisitReports: React.FC = () => {
   const [stats, setStats] = useState<FieldVisitStats | null>(null);
   const [sales, setSales] = useState<SalesSummary[]>([]);
   const [selectedVisitId, setSelectedVisitId] = useState('');
+  const [selectedVisitPhoto, setSelectedVisitPhoto] = useState<string>('');
+  const [photoLoading, setPhotoLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
   const deferredSearch = useDeferredValue(search);
   const isAdmin = profile?.roleTemplate === 'Admin';
-  const hasAccess = canUseFieldVisits(profile?.roleTemplate);
+  const hasAccess = canUseFieldVisitReports(profile?.roleTemplate);
 
   const loadReport = async () => {
     if (!token || !hasAccess) return;
@@ -194,6 +212,47 @@ export const FieldVisitReports: React.FC = () => {
     return filteredVisits.find((visit) => visit.id === selectedVisitId) || filteredVisits[0];
   }, [filteredVisits, selectedVisitId]);
 
+  useEffect(() => {
+    if (!token || !selectedVisit?.id) {
+      setSelectedVisitPhoto('');
+      setPhotoLoading(false);
+      return;
+    }
+
+    if (!selectedVisit.hasPhoto) {
+      setSelectedVisitPhoto('');
+      setPhotoLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadVisitPhoto = async () => {
+      setPhotoLoading(true);
+      try {
+        const response = await fetch(`/api/field-visits/${selectedVisit.id}`, {
+          headers: { 'x-v2-auth-token': `Bearer ${token}` }
+        });
+        const data = await response.json();
+        if (!response.ok || !data.success) throw new Error(data.error || 'Unable to load visit photo.');
+        if (!cancelled) setSelectedVisitPhoto(data.visit?.photoDataUrl || '');
+      } catch (err: any) {
+        if (!cancelled) {
+          setSelectedVisitPhoto('');
+          setError(err.message || 'Unable to load visit photo.');
+        }
+      } finally {
+        if (!cancelled) setPhotoLoading(false);
+      }
+    };
+
+    loadVisitPhoto();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedVisit?.hasPhoto, selectedVisit?.id, token]);
+
   const points = useMemo(
     () =>
       filteredVisits.filter(
@@ -244,6 +303,24 @@ export const FieldVisitReports: React.FC = () => {
       top: `${Math.min(92, Math.max(8, y))}%`
     };
   };
+
+  const mapEmbedUrl = useMemo(() => {
+    const selectedLocation = selectedVisit?.checkInLocation;
+    if (selectedLocation && Number.isFinite(Number(selectedLocation.latitude)) && Number.isFinite(Number(selectedLocation.longitude))) {
+      const lat = clamp(Number(selectedLocation.latitude), -47.5, -33.5);
+      const lng = clamp(Number(selectedLocation.longitude), 165.5, 179.5);
+      return `https://maps.google.com/maps?q=${lat},${lng}&z=15&hl=en&output=embed`;
+    }
+
+    if (points.length > 0) {
+      const centerLat = clamp((bounds.minLat + bounds.maxLat) / 2, -47.5, -33.5);
+      const centerLng = clamp((bounds.minLng + bounds.maxLng) / 2, 165.5, 179.5);
+      const zoom = getZoomFromBounds(bounds.maxLat - bounds.minLat, bounds.maxLng - bounds.minLng);
+      return `https://maps.google.com/maps?q=${centerLat},${centerLng}&z=${zoom}&hl=en&output=embed`;
+    }
+
+    return 'https://maps.google.com/maps?q=New%20Zealand&z=5&hl=en&output=embed';
+  }, [bounds.maxLat, bounds.maxLng, bounds.minLat, bounds.minLng, points.length, selectedVisit]);
 
   const setPreset = (preset: DatePreset) => {
     const range = getPresetRange(preset);
@@ -297,7 +374,7 @@ export const FieldVisitReports: React.FC = () => {
             </div>
             <h2 className="mt-4 text-2xl font-black text-slate-900">Field visit access required</h2>
             <p className="mt-2 text-sm leading-relaxed text-slate-500">
-              This page is available to Sales and Admin accounts only.
+              This page is available to Admin accounts only.
             </p>
           </div>
         </div>
@@ -456,18 +533,24 @@ export const FieldVisitReports: React.FC = () => {
               </div>
 
               <div className="relative h-[520px] overflow-hidden bg-[linear-gradient(180deg,#f8fafc_0%,#eef2ff_100%)]">
-                <div
-                  className="absolute inset-0 opacity-40"
-                  style={{
-                    backgroundImage:
-                      'linear-gradient(#cbd5e1 1px, transparent 1px), linear-gradient(90deg, #cbd5e1 1px, transparent 1px)',
-                    backgroundSize: '56px 56px'
-                  }}
+                <iframe
+                  title="Field visit map"
+                  src={mapEmbedUrl}
+                  className="absolute inset-0 h-full w-full border-0"
+                  loading="lazy"
+                  referrerPolicy="no-referrer-when-downgrade"
                 />
+                <div className="absolute inset-0 bg-white/10" />
                 <div className="absolute left-5 top-5 rounded-2xl border border-white/70 bg-white/90 px-4 py-3 shadow-sm backdrop-blur">
                   <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">Date Range</p>
                   <p className="mt-1 text-sm font-black text-slate-800">
                     {startDate} to {endDate}
+                  </p>
+                </div>
+                <div className="absolute right-5 top-5 rounded-2xl border border-white/70 bg-white/90 px-4 py-3 text-right shadow-sm backdrop-blur">
+                  <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">Map Mode</p>
+                  <p className="mt-1 text-sm font-black text-slate-800">
+                    {selectedVisit ? 'Selected Visit' : 'All Visible Visits'}
                   </p>
                 </div>
 
@@ -548,6 +631,26 @@ export const FieldVisitReports: React.FC = () => {
                     {selectedVisit.purpose && (
                       <div className="rounded-2xl bg-indigo-50 p-3 text-sm font-semibold text-indigo-800">
                         Purpose: {selectedVisit.purpose}
+                      </div>
+                    )}
+
+                    {selectedVisit.hasPhoto && (
+                      <div className="overflow-hidden rounded-2xl border border-slate-200 bg-slate-50">
+                        <div className="flex items-center justify-between border-b border-slate-200 px-3 py-2">
+                          <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Visit Photo</p>
+                          {photoLoading && <span className="text-xs font-semibold text-slate-500">Loading...</span>}
+                        </div>
+                        {selectedVisitPhoto ? (
+                          <img
+                            src={selectedVisitPhoto}
+                            alt={`${selectedVisit.customerName} visit evidence`}
+                            className="h-56 w-full bg-white object-cover"
+                          />
+                        ) : (
+                          <div className="flex h-56 items-center justify-center bg-white px-4 text-center text-sm text-slate-400">
+                            {photoLoading ? 'Loading visit photo...' : 'Visit photo is not available.'}
+                          </div>
+                        )}
                       </div>
                     )}
 

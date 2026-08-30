@@ -100,7 +100,7 @@ export const FieldVisits: React.FC = () => {
 
   const activeVisit = useMemo(() => visits.find(visit => visit.status === 'Active'), [visits]);
   const completedVisits = useMemo(() => visits.filter(visit => visit.status === 'Completed'), [visits]);
-  const hasAccess = profile?.roleTemplate === 'Sales' || profile?.roleTemplate === 'Admin';
+  const hasAccess = !!profile;
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -179,7 +179,7 @@ export const FieldVisits: React.FC = () => {
             </div>
             <h2 className="mt-4 text-2xl font-black text-slate-900">Field visit access required</h2>
             <p className="mt-2 text-sm leading-relaxed text-slate-500">
-              This page is available to Sales and Admin accounts only.
+              This page is available to signed-in users only.
             </p>
           </div>
         </div>

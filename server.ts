@@ -3495,10 +3495,7 @@ async function startServer() {
   });
 
   // Field sales visit tracking
-  const canUseFieldVisits = (user: any) => {
-    const role = user?.roleTemplate || user?.role;
-    return role === "Sales" || role === "Admin" || SUPER_ADMINS.includes(String(user?.username || "").toLowerCase());
-  };
+  const canAccessFieldVisits = (user: any) => !!user?.uid;
 
   const isFieldVisitAdmin = (user: any) => {
     const role = user?.roleTemplate || user?.role;
@@ -3546,7 +3543,7 @@ async function startServer() {
   app.get("/api/field-visits", authenticate, async (req: any, res) => {
     const currentDb = await initDb();
     if (!currentDb) return res.status(503).json({ success: false, error: "Database not initialized" });
-    if (!canUseFieldVisits(req.user)) return res.status(403).json({ success: false, error: "Sales access required" });
+    if (!canAccessFieldVisits(req.user)) return res.status(403).json({ success: false, error: "Authentication required" });
 
     try {
       const isAdminUser = isFieldVisitAdmin(req.user);
@@ -3566,7 +3563,7 @@ async function startServer() {
   app.get("/api/field-visits/report", authenticate, async (req: any, res) => {
     const currentDb = await initDb();
     if (!currentDb) return res.status(503).json({ success: false, error: "Database not initialized" });
-    if (!canUseFieldVisits(req.user)) return res.status(403).json({ success: false, error: "Sales access required" });
+    if (!isFieldVisitAdmin(req.user)) return res.status(403).json({ success: false, error: "Admin access required" });
 
     try {
       const nowAuckland = DateTime.now().setZone(AUCKLAND_TIMEZONE);
@@ -3641,10 +3638,39 @@ async function startServer() {
     }
   });
 
+  app.get("/api/field-visits/:id", authenticate, async (req: any, res) => {
+    const currentDb = await initDb();
+    if (!currentDb) return res.status(503).json({ success: false, error: "Database not initialized" });
+    if (!canAccessFieldVisits(req.user)) return res.status(403).json({ success: false, error: "Authentication required" });
+
+    try {
+      const snapshot = await currentDb.collection("field_visits").doc(String(req.params.id)).get();
+      if (!snapshot.exists) return res.status(404).json({ success: false, error: "Visit not found" });
+
+      const visit = snapshot.data() as any;
+      const isAdminUser = isFieldVisitAdmin(req.user);
+      if (!isAdminUser && visit.salesUid !== req.user.uid) {
+        return res.status(403).json({ success: false, error: "You cannot view another salesperson's visit" });
+      }
+
+      return res.json({
+        success: true,
+        visit: {
+          ...visit,
+          id: snapshot.id,
+          hasPhoto: !!visit.photoDataUrl
+        }
+      });
+    } catch (error: any) {
+      console.error("Field Visit Detail Error:", error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
   app.post("/api/field-visits/check-in", authenticate, async (req: any, res) => {
     const currentDb = await initDb();
     if (!currentDb) return res.status(503).json({ success: false, error: "Database not initialized" });
-    if (!canUseFieldVisits(req.user)) return res.status(403).json({ success: false, error: "Sales access required" });
+    if (!canAccessFieldVisits(req.user)) return res.status(403).json({ success: false, error: "Authentication required" });
 
     try {
       const customerName = String(req.body?.customerName || "").trim();
@@ -3686,7 +3712,7 @@ async function startServer() {
   app.post("/api/field-visits/:id/check-out", authenticate, async (req: any, res) => {
     const currentDb = await initDb();
     if (!currentDb) return res.status(503).json({ success: false, error: "Database not initialized" });
-    if (!canUseFieldVisits(req.user)) return res.status(403).json({ success: false, error: "Sales access required" });
+    if (!canAccessFieldVisits(req.user)) return res.status(403).json({ success: false, error: "Authentication required" });
 
     try {
       const visitRef = currentDb.collection("field_visits").doc(req.params.id);
