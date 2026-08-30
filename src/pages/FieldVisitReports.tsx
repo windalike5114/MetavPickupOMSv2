@@ -151,7 +151,7 @@ const ensureLeaflet = (): Promise<LeafletLike> =>
       const link = document.createElement('link');
       link.id = LEAFLET_CSS_ID;
       link.rel = 'stylesheet';
-      link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+      link.href = 'https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css';
       document.head.appendChild(link);
     }
 
@@ -164,7 +164,7 @@ const ensureLeaflet = (): Promise<LeafletLike> =>
 
     const script = document.createElement('script');
     script.id = LEAFLET_SCRIPT_ID;
-    script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+    script.src = 'https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js';
     script.async = true;
     script.onload = () => resolve(window.L as LeafletLike);
     script.onerror = () => reject(new Error('Unable to load map library.'));
