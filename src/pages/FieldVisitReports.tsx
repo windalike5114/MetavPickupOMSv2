@@ -166,6 +166,8 @@ export const FieldVisitReports: React.FC = () => {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<any>(null);
   const markerLayerRef = useRef<any>(null);
+  const lastFocusedVisitIdRef = useRef('');
+  const lastFocusedVersionRef = useRef(-1);
   const initialRange = useMemo(() => getPresetRange('thisWeek'), []);
   const [startDate, setStartDate] = useState(initialRange.start);
   const [endDate, setEndDate] = useState(initialRange.end);
@@ -379,20 +381,9 @@ export const FieldVisitReports: React.FC = () => {
   useEffect(() => {
     if (!mapRef.current || !markerLayerRef.current || !window.L) return;
 
-    const L = window.L;
     const map = mapRef.current;
     const markerLayer = markerLayerRef.current;
     markerLayer.clearLayers();
-
-    if (!points.length) {
-      map.setView([-41.2865, 174.7762], 5, { animate: true });
-      return;
-    }
-
-    const latLngs = points.map((visit) => [
-      Number(visit.checkInLocation?.latitude),
-      Number(visit.checkInLocation?.longitude)
-    ]);
 
     const clusters = buildVisitClusters(map, points);
 
@@ -433,6 +424,27 @@ export const FieldVisitReports: React.FC = () => {
       );
       marker.addTo(markerLayer);
     });
+  }, [mapZoomVersion, points, selectedVisit]);
+
+  useEffect(() => {
+    if (!mapRef.current || !window.L) return;
+
+    const L = window.L;
+    const map = mapRef.current;
+
+    if (!points.length) {
+      map.setView([-41.2865, 174.7762], 5, { animate: true });
+      lastFocusedVisitIdRef.current = '';
+      lastFocusedVersionRef.current = mapFocusVersion;
+      return;
+    }
+
+    if (
+      lastFocusedVersionRef.current === mapFocusVersion &&
+      lastFocusedVisitIdRef.current === selectedVisitId
+    ) {
+      return;
+    }
 
     if (selectedVisit?.checkInLocation) {
       map.flyTo(
@@ -443,12 +455,20 @@ export const FieldVisitReports: React.FC = () => {
         15,
         { animate: true, duration: 0.8 }
       );
+      lastFocusedVisitIdRef.current = selectedVisit.id;
+      lastFocusedVersionRef.current = mapFocusVersion;
       return;
     }
 
+    const latLngs = points.map((visit) => [
+      Number(visit.checkInLocation?.latitude),
+      Number(visit.checkInLocation?.longitude)
+    ]);
     const bounds = L.latLngBounds(latLngs);
     map.fitBounds(bounds.pad(0.2), { animate: true, maxZoom: 13 });
-  }, [mapFocusVersion, mapZoomVersion, points, selectedVisit]);
+    lastFocusedVisitIdRef.current = '';
+    lastFocusedVersionRef.current = mapFocusVersion;
+  }, [mapFocusVersion, points, selectedVisit, selectedVisitId]);
 
   const setPreset = (preset: DatePreset) => {
     const range = getPresetRange(preset);
@@ -563,8 +583,8 @@ export const FieldVisitReports: React.FC = () => {
             </div>
           )}
 
-          <div className="grid min-h-0 flex-1 gap-4 grid-rows-[minmax(270px,.78fr)_minmax(340px,1.22fr)]">
-            <div className="grid min-h-0 gap-4 xl:grid-cols-[minmax(0,1.45fr)_360px]">
+          <div className="grid min-h-0 flex-1 gap-4 xl:grid-cols-[minmax(0,1.42fr)_380px]">
+            <div className="grid min-h-0 gap-4 grid-rows-[minmax(330px,1.08fr)_minmax(290px,0.92fr)]">
             <section className="flex min-h-0 flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
               <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
                 <div>
@@ -626,6 +646,67 @@ export const FieldVisitReports: React.FC = () => {
                 ) : null}
               </div>
             </section>
+
+            <section className="flex min-h-0 flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+              <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+                <div>
+                  <h2 className="text-lg font-black text-slate-900">Visit Records</h2>
+                  <p className="text-sm text-slate-500">
+                    Click any row to refocus the map and load its visit details
+                  </p>
+                </div>
+                <CalendarDays className="h-5 w-5 text-slate-400" />
+              </div>
+
+              <div className="min-h-0 flex-1 overflow-auto">
+                <table className="w-full min-w-[720px] text-left text-sm">
+                  <thead className="sticky top-0 bg-slate-50 text-xs font-black uppercase tracking-wider text-slate-400">
+                    <tr>
+                      <th className="px-4 py-3">Customer</th>
+                      <th className="px-4 py-3">Sales</th>
+                      <th className="px-4 py-3">Check In</th>
+                      <th className="px-4 py-3">Duration</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {loading ? (
+                      <tr>
+                        <td colSpan={4} className="px-4 py-12 text-center text-slate-400">
+                          Loading report...
+                        </td>
+                      </tr>
+                    ) : filteredVisits.length === 0 ? (
+                      <tr>
+                        <td colSpan={4} className="px-4 py-12 text-center text-slate-400">
+                          No visits found.
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredVisits.map((visit) => (
+                        <tr
+                          key={visit.id}
+                          className={`cursor-pointer transition-colors hover:bg-slate-50 ${
+                            selectedVisit?.id === visit.id ? 'bg-indigo-50/60' : ''
+                          }`}
+                          onClick={() => focusVisit(visit.id)}
+                        >
+                          <td className="px-4 py-3">
+                            <p className="font-black text-slate-900">{visit.customerName}</p>
+                            {visit.contactName && <p className="text-xs text-slate-500">{visit.contactName}</p>}
+                          </td>
+                          <td className="px-4 py-3 font-semibold text-slate-700">{visit.salesName}</td>
+                          <td className="px-4 py-3 text-slate-600">{formatVisitTime(visit.startedAt)}</td>
+                          <td className="px-4 py-3 font-mono font-bold text-slate-700">
+                            {formatDuration(visit.durationSeconds)}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+            </div>
 
             <aside className="min-h-0">
               <section className="flex h-full min-h-0 flex-col rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -726,89 +807,6 @@ export const FieldVisitReports: React.FC = () => {
                 )}
               </section>
             </aside>
-            </div>
-
-          <section className="flex min-h-0 flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
-            <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
-              <div>
-                <h2 className="text-lg font-black text-slate-900">Visit Records</h2>
-                <p className="text-sm text-slate-500">
-                  Click any row to refocus the map and load its visit details
-                </p>
-              </div>
-              <CalendarDays className="h-5 w-5 text-slate-400" />
-            </div>
-
-            <div className="min-h-0 flex-1 overflow-auto">
-              <table className="w-full min-w-[980px] text-left text-sm">
-                <thead className="sticky top-0 bg-slate-50 text-xs font-black uppercase tracking-wider text-slate-400">
-                  <tr>
-                    <th className="px-4 py-3">Customer</th>
-                    <th className="px-4 py-3">Sales</th>
-                    <th className="px-4 py-3">Check In</th>
-                    <th className="px-4 py-3">Duration</th>
-                    <th className="px-4 py-3">Outcome</th>
-                    <th className="px-4 py-3">Summary</th>
-                    <th className="px-4 py-3">Map</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {loading ? (
-                    <tr>
-                      <td colSpan={7} className="px-4 py-12 text-center text-slate-400">
-                        Loading report...
-                      </td>
-                    </tr>
-                  ) : filteredVisits.length === 0 ? (
-                    <tr>
-                      <td colSpan={7} className="px-4 py-12 text-center text-slate-400">
-                        No visits found.
-                      </td>
-                    </tr>
-                  ) : (
-                    filteredVisits.map((visit) => (
-                      <tr
-                        key={visit.id}
-                        className={`cursor-pointer transition-colors hover:bg-slate-50 ${
-                          selectedVisit?.id === visit.id ? 'bg-indigo-50/60' : ''
-                        }`}
-                        onClick={() => focusVisit(visit.id)}
-                      >
-                        <td className="px-4 py-3">
-                          <p className="font-black text-slate-900">{visit.customerName}</p>
-                          {visit.contactName && <p className="text-xs text-slate-500">{visit.contactName}</p>}
-                        </td>
-                        <td className="px-4 py-3 font-semibold text-slate-700">{visit.salesName}</td>
-                        <td className="px-4 py-3 text-slate-600">{formatVisitTime(visit.startedAt)}</td>
-                        <td className="px-4 py-3 font-mono font-bold text-slate-700">
-                          {formatDuration(visit.durationSeconds)}
-                        </td>
-                        <td className="px-4 py-3">
-                          <span className="rounded-xl bg-indigo-50 px-3 py-1 text-xs font-black text-indigo-700">
-                            {visit.outcome || visit.status}
-                          </span>
-                        </td>
-                        <td className="max-w-md px-4 py-3 text-slate-600">
-                          <p className="line-clamp-1">{visit.summary || visit.purpose || '-'}</p>
-                        </td>
-                        <td className="px-4 py-3">
-                          <a
-                            href={getMapUrl(visit.checkInLocation)}
-                            target="_blank"
-                            rel="noreferrer"
-                            onClick={(event) => event.stopPropagation()}
-                            className="inline-flex items-center gap-1 rounded-xl bg-slate-100 px-3 py-2 text-xs font-black text-slate-700 transition-colors hover:bg-slate-200"
-                          >
-                            Open <ExternalLink className="h-3 w-3" />
-                          </a>
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </section>
           </div>
         </div>
       </div>
