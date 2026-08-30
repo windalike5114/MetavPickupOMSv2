@@ -1,14 +1,9 @@
-import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  BarChart3,
   CalendarDays,
-  Clock3,
   ExternalLink,
   MapPin,
-  RefreshCw,
-  Route,
-  Search,
-  Users
+  RefreshCw
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { PageHeader } from '../components/PageHeader';
@@ -40,17 +35,6 @@ type FieldVisit = {
   salesUsername?: string;
   hasPhoto?: boolean;
   photoDataUrl?: string;
-};
-
-type FieldVisitStats = {
-  totalVisits: number;
-  completedVisits: number;
-  activeVisits: number;
-  uniqueCustomers: number;
-  totalDurationSeconds: number;
-  averageDurationSeconds: number;
-  withPhoto: number;
-  gpsVisits: number;
 };
 
 type SalesSummary = {
@@ -186,9 +170,7 @@ export const FieldVisitReports: React.FC = () => {
   const [startDate, setStartDate] = useState(initialRange.start);
   const [endDate, setEndDate] = useState(initialRange.end);
   const [salesUid, setSalesUid] = useState('all');
-  const [search, setSearch] = useState('');
   const [visits, setVisits] = useState<FieldVisit[]>([]);
-  const [stats, setStats] = useState<FieldVisitStats | null>(null);
   const [sales, setSales] = useState<SalesSummary[]>([]);
   const [selectedVisitId, setSelectedVisitId] = useState('');
   const [selectedVisitPhoto, setSelectedVisitPhoto] = useState<string>('');
@@ -199,7 +181,6 @@ export const FieldVisitReports: React.FC = () => {
   const [mapZoomVersion, setMapZoomVersion] = useState(0);
   const [error, setError] = useState('');
 
-  const deferredSearch = useDeferredValue(search);
   const isAdmin = profile?.roleTemplate === 'Admin';
   const hasAccess = canUseFieldVisitReports(profile?.roleTemplate);
 
@@ -219,7 +200,6 @@ export const FieldVisitReports: React.FC = () => {
 
       const nextVisits = data.visits || [];
       setVisits(nextVisits);
-      setStats(data.stats || null);
       setSales(data.sales || []);
       setSelectedVisitId((current) =>
         current && nextVisits.some((visit: FieldVisit) => visit.id === current) ? current : ''
@@ -235,22 +215,7 @@ export const FieldVisitReports: React.FC = () => {
     loadReport();
   }, [token, hasAccess, isAdmin, salesUid, startDate, endDate]);
 
-  const filteredVisits = useMemo(() => {
-    const keyword = deferredSearch.trim().toLowerCase();
-    if (!keyword) return visits;
-
-    return visits.filter((visit) =>
-      [
-        visit.customerName,
-        visit.contactName,
-        visit.purpose,
-        visit.summary,
-        visit.outcome,
-        visit.nextAction,
-        visit.salesName
-      ].some((value) => String(value || '').toLowerCase().includes(keyword))
-    );
-  }, [deferredSearch, visits]);
+  const filteredVisits = visits;
 
   const selectedVisit = useMemo(
     () => filteredVisits.find((visit) => visit.id === selectedVisitId) || null,
@@ -491,37 +456,6 @@ export const FieldVisitReports: React.FC = () => {
     setEndDate(range.end);
   };
 
-  const statCards = [
-    {
-      label: 'Total Visits',
-      value: stats?.totalVisits || 0,
-      helper: `${stats?.gpsVisits || 0} with GPS`,
-      icon: Route,
-      accent: 'bg-indigo-100 text-indigo-700'
-    },
-    {
-      label: 'Customers',
-      value: stats?.uniqueCustomers || 0,
-      helper: `${stats?.withPhoto || 0} with photo`,
-      icon: Users,
-      accent: 'bg-emerald-100 text-emerald-700'
-    },
-    {
-      label: 'Completed',
-      value: stats?.completedVisits || 0,
-      helper: `${stats?.activeVisits || 0} still active`,
-      icon: BarChart3,
-      accent: 'bg-amber-100 text-amber-700'
-    },
-    {
-      label: 'Average Visit',
-      value: formatDuration(stats?.averageDurationSeconds),
-      helper: `${formatDuration(stats?.totalDurationSeconds)} total`,
-      icon: Clock3,
-      accent: 'bg-slate-100 text-slate-700'
-    }
-  ];
-
   if (!hasAccess) {
     return (
       <div className="flex h-full flex-col overflow-hidden bg-slate-50">
@@ -629,42 +563,14 @@ export const FieldVisitReports: React.FC = () => {
             </div>
           )}
 
-          <div className="grid flex-shrink-0 gap-4 md:grid-cols-2 xl:grid-cols-[repeat(4,minmax(0,1fr))_minmax(300px,1.15fr)]">
-            {statCards.map((card) => (
-              <section key={card.label} className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">{card.label}</p>
-                    <p className="mt-2 text-2xl font-black tracking-tight text-slate-900">{card.value}</p>
-                    <p className="mt-1 text-sm text-slate-500">{card.helper}</p>
-                  </div>
-                  <div className={`rounded-2xl p-3 ${card.accent}`}>
-                    <card.icon className="h-5 w-5" />
-                  </div>
-                </div>
-              </section>
-            ))}
-            <section className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
-              <div className="relative h-full">
-                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                <input
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Search customer, purpose, summary..."
-                  className="h-full min-h-[72px] w-full rounded-2xl border border-slate-200 bg-slate-50 py-3 pl-10 pr-4 text-sm outline-none focus:border-indigo-500 focus:bg-white"
-                />
-              </div>
-            </section>
-          </div>
-
-          <div className="grid min-h-0 flex-1 gap-4 grid-rows-[minmax(300px,1.05fr)_minmax(220px,.95fr)]">
+          <div className="grid min-h-0 flex-1 gap-4 grid-rows-[minmax(270px,.78fr)_minmax(340px,1.22fr)]">
             <div className="grid min-h-0 gap-4 xl:grid-cols-[minmax(0,1.45fr)_360px]">
             <section className="flex min-h-0 flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
               <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
                 <div>
                   <h2 className="text-lg font-black text-slate-900">Visit Map</h2>
                   <p className="text-sm text-slate-500">
-                    {filteredVisits.length} visit records in range
+                    {filteredVisits.length} visit records in this range
                   </p>
                 </div>
                 <div className="rounded-2xl bg-slate-100 px-3 py-2 text-xs font-black uppercase tracking-wide text-slate-500">
@@ -739,22 +645,22 @@ export const FieldVisitReports: React.FC = () => {
                 </div>
 
                 {detailVisit ? (
-                  <div className="mt-4 space-y-4 overflow-y-auto pr-1">
+                  <div className="mt-4 space-y-3">
                     <div>
-                      <p className="text-2xl font-black text-slate-900">{detailVisit.customerName}</p>
-                      <p className="mt-1 text-sm font-semibold text-slate-500">
+                      <p className="text-xl font-black text-slate-900">{detailVisit.customerName}</p>
+                      <p className="mt-1 text-xs font-semibold text-slate-500">
                         {detailVisit.salesName} · {formatVisitTime(detailVisit.startedAt)}
                       </p>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-3 text-sm">
-                      <div className="rounded-2xl bg-slate-50 p-3">
+                    <div className="grid grid-cols-2 gap-2 text-sm">
+                      <div className="rounded-2xl bg-slate-50 p-2.5">
                         <p className="text-xs font-bold text-slate-400">Duration</p>
                         <p className="mt-1 font-black text-slate-800">
                           {formatDuration(detailVisit.durationSeconds)}
                         </p>
                       </div>
-                      <div className="rounded-2xl bg-slate-50 p-3">
+                      <div className="rounded-2xl bg-slate-50 p-2.5">
                         <p className="text-xs font-bold text-slate-400">Outcome</p>
                         <p className="mt-1 font-black text-slate-800">
                           {detailVisit.outcome || detailVisit.status}
@@ -763,7 +669,7 @@ export const FieldVisitReports: React.FC = () => {
                     </div>
 
                     {detailVisit.purpose && (
-                      <div className="rounded-2xl bg-indigo-50 p-3 text-sm font-semibold text-indigo-800">
+                      <div className="rounded-2xl bg-indigo-50 p-2.5 text-sm font-semibold text-indigo-800 line-clamp-2">
                         Purpose: {detailVisit.purpose}
                       </div>
                     )}
@@ -778,10 +684,10 @@ export const FieldVisitReports: React.FC = () => {
                           <img
                             src={selectedVisitPhoto}
                             alt={`${detailVisit.customerName} visit evidence`}
-                            className="h-56 w-full bg-white object-cover"
+                            className="h-36 w-full bg-white object-cover"
                           />
                         ) : (
-                          <div className="flex h-56 items-center justify-center bg-white px-4 text-center text-sm text-slate-400">
+                          <div className="flex h-36 items-center justify-center bg-white px-4 text-center text-sm text-slate-400">
                             {photoLoading ? 'Loading visit photo...' : 'Visit photo is not available.'}
                           </div>
                         )}
@@ -789,11 +695,14 @@ export const FieldVisitReports: React.FC = () => {
                     )}
 
                     {detailVisit.summary && (
-                      <p className="text-sm leading-relaxed text-slate-600">{detailVisit.summary}</p>
+                      <div className="rounded-2xl border border-slate-200 bg-white p-3">
+                        <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Summary</p>
+                        <p className="mt-1 text-sm leading-relaxed text-slate-600 line-clamp-4">{detailVisit.summary}</p>
+                      </div>
                     )}
 
                     {detailVisit.nextAction && (
-                      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-2.5">
                         <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Next Action</p>
                         <p className="mt-1 text-sm font-semibold text-slate-700">
                           {detailVisit.nextAction}
@@ -824,7 +733,7 @@ export const FieldVisitReports: React.FC = () => {
               <div>
                 <h2 className="text-lg font-black text-slate-900">Visit Records</h2>
                 <p className="text-sm text-slate-500">
-                  Personal weekly trace for Sales, full team overview for Admin
+                  Click any row to refocus the map and load its visit details
                 </p>
               </div>
               <CalendarDays className="h-5 w-5 text-slate-400" />
@@ -832,7 +741,7 @@ export const FieldVisitReports: React.FC = () => {
 
             <div className="min-h-0 flex-1 overflow-auto">
               <table className="w-full min-w-[980px] text-left text-sm">
-                <thead className="bg-slate-50 text-xs font-black uppercase tracking-wider text-slate-400">
+                <thead className="sticky top-0 bg-slate-50 text-xs font-black uppercase tracking-wider text-slate-400">
                   <tr>
                     <th className="px-4 py-3">Customer</th>
                     <th className="px-4 py-3">Sales</th>
@@ -865,24 +774,24 @@ export const FieldVisitReports: React.FC = () => {
                         }`}
                         onClick={() => focusVisit(visit.id)}
                       >
-                        <td className="px-4 py-4">
+                        <td className="px-4 py-3">
                           <p className="font-black text-slate-900">{visit.customerName}</p>
                           {visit.contactName && <p className="text-xs text-slate-500">{visit.contactName}</p>}
                         </td>
-                        <td className="px-4 py-4 font-semibold text-slate-700">{visit.salesName}</td>
-                        <td className="px-4 py-4 text-slate-600">{formatVisitTime(visit.startedAt)}</td>
-                        <td className="px-4 py-4 font-mono font-bold text-slate-700">
+                        <td className="px-4 py-3 font-semibold text-slate-700">{visit.salesName}</td>
+                        <td className="px-4 py-3 text-slate-600">{formatVisitTime(visit.startedAt)}</td>
+                        <td className="px-4 py-3 font-mono font-bold text-slate-700">
                           {formatDuration(visit.durationSeconds)}
                         </td>
-                        <td className="px-4 py-4">
+                        <td className="px-4 py-3">
                           <span className="rounded-xl bg-indigo-50 px-3 py-1 text-xs font-black text-indigo-700">
                             {visit.outcome || visit.status}
                           </span>
                         </td>
-                        <td className="max-w-md px-4 py-4 text-slate-600">
-                          <p className="line-clamp-2">{visit.summary || visit.purpose || '-'}</p>
+                        <td className="max-w-md px-4 py-3 text-slate-600">
+                          <p className="line-clamp-1">{visit.summary || visit.purpose || '-'}</p>
                         </td>
-                        <td className="px-4 py-4">
+                        <td className="px-4 py-3">
                           <a
                             href={getMapUrl(visit.checkInLocation)}
                             target="_blank"
