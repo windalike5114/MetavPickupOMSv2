@@ -553,7 +553,7 @@ async function startServer() {
       const isCnPortal = isCnPortalRequest(req);
       const allowedWarehouses: string[] = req.user.allowedWarehouses || [];
 
-      if (!isSuper && !isSales && !allowedWarehouses.includes("*") && warehouseId && !allowedWarehouses.includes(warehouseId)) {
+      if (!isCnPortal && !isSuper && !isSales && !allowedWarehouses.includes("*") && warehouseId && !allowedWarehouses.includes(warehouseId)) {
         return res.status(403).json({ success: false, error: "Forbidden: You do not have access to this warehouse" });
       }
 
@@ -656,7 +656,13 @@ async function startServer() {
         effectiveWarehouses = requestedWh ? [requestedWh] : effectiveWarehouses;
       }
       let orders: any[] = [];
-      if (needsAklCompatScan) {
+      if (isCnPortal && !warehouseId) {
+        const [warehouseOrders, unassignedOrders] = await Promise.all([
+          fetchByWarehouseIn(["AKL", "CHC"]),
+          fetchRecentUnassigned()
+        ]);
+        orders = mergeOrdersDedup(warehouseOrders, unassignedOrders);
+      } else if (needsAklCompatScan) {
         const snap = await currentDb.collection("orders").orderBy("createdTime", "desc").limit(limitValue).get();
         orders = snap.docs
           .map((d: any) => ({ id: d.id, ...d.data() }))
@@ -709,6 +715,130 @@ async function startServer() {
       console.error("Orders List Error:", error);
       const safeMessage = error?.message || "Unknown server error";
       return res.status(500).json({ success: false, error: safeMessage });
+    }
+  });
+
+  // CN portal daily overview. Calendar boundaries follow Pacific/Auckland.
+  app.get("/api/cn/dashboard/stats", authenticate, async (req: any, res) => {
+    const currentDb = await initDb();
+    if (!currentDb) return res.status(503).json({ success: false, error: "Database not initialized" });
+
+    try {
+      if (!isCnPortalRequest(req)) {
+        return res.status(403).json({ success: false, error: "Forbidden: CN portal access required" });
+      }
+
+      const requestedDate = String(req.query.date || "").trim();
+      const day = requestedDate
+        ? DateTime.fromISO(requestedDate, { zone: AUCKLAND_TIMEZONE })
+        : DateTime.now().setZone(AUCKLAND_TIMEZONE);
+      if (!day.isValid || (requestedDate && !/^\d{4}-\d{2}-\d{2}$/.test(requestedDate))) {
+        return res.status(400).json({ success: false, error: "Invalid date. Expected YYYY-MM-DD." });
+      }
+
+      const startLocal = day.startOf("day");
+      const endLocal = startLocal.plus({ days: 1 });
+      const startLocalIso = startLocal.toISO();
+      const endLocalIso = endLocal.toISO();
+      const startUtcIso = startLocal.toUTC().toISO();
+      const endUtcIso = endLocal.toUTC().toISO();
+      if (!startLocalIso || !endLocalIso || !startUtcIso || !endUtcIso) {
+        throw new Error("Unable to calculate Auckland day boundaries");
+      }
+
+      const [ordersSnap, counterSnap] = await Promise.all([
+        currentDb.collection("orders")
+          .where("actualPickupTime", ">=", startUtcIso)
+          .where("actualPickupTime", "<", endUtcIso)
+          .get(),
+        currentDb.collection("counter_pickups")
+          .where("updatedAt", ">=", startLocalIso)
+          .where("updatedAt", "<", endLocalIso)
+          .get()
+      ]);
+
+      const warehouses: Record<string, any> = {
+        AKL: { warehouseId: "AKL", warehouseName: "Auckland", onlineOrders: 0, onlineItems: 0, localRequests: 0, localItems: 0 },
+        CHC: { warehouseId: "CHC", warehouseName: "Christchurch", onlineOrders: 0, onlineItems: 0, localRequests: 0, localItems: 0 }
+      };
+
+      ordersSnap.docs.forEach((docSnap: any) => {
+        const order = docSnap.data() || {};
+        const warehouseId = normalizeWarehouseId(order.warehouseId);
+        if (!warehouseId || !warehouses[warehouseId]) return;
+        const items = Array.isArray(order.items) ? order.items : [];
+        const pickedItems = items.some((item: any) => item?.status === "Picked")
+          ? items.filter((item: any) => item?.status === "Picked")
+          : items;
+        warehouses[warehouseId].onlineOrders += 1;
+        warehouses[warehouseId].onlineItems += pickedItems.reduce(
+          (sum: number, item: any) => sum + Math.max(0, Number(item?.qty) || 0),
+          0
+        );
+      });
+
+      counterSnap.docs.forEach((docSnap: any) => {
+        const request = docSnap.data() || {};
+        const warehouseId = normalizeWarehouseId(request.warehouseId);
+        if (!warehouseId || !warehouses[warehouseId] || request.expiredBySystem) return;
+        const items = Array.isArray(request.items) && request.items.length
+          ? request.items
+          : [{
+              qty: request.qty,
+              outcome: request.outcome,
+              destination: request.destination,
+              finalizedAt: request.finalizedAt || request.completedAt || request.updatedAt
+            }];
+        const completedOutboundItems = items.filter((item: any) => {
+          const rawOutcome = item?.outcome || item?.destination || request.outcome || request.destination;
+          if (!rawOutcome) return false;
+          const outcome = normalizeCounterPickupOutcome(rawOutcome);
+          if (outcome === "returnedToWarehouse") return false;
+          const finalizedAt = item?.finalizedAt || item?.completedAt || (
+            request.status === "Finalized"
+              ? request.finalizedAt || request.completedAt || request.updatedAt
+              : null
+          );
+          if (!finalizedAt) return false;
+          const finalizedMs = DateTime.fromISO(String(finalizedAt), { zone: AUCKLAND_TIMEZONE }).toMillis();
+          return finalizedMs >= startLocal.toMillis() && finalizedMs < endLocal.toMillis();
+        });
+        if (!completedOutboundItems.length) return;
+        warehouses[warehouseId].localRequests += 1;
+        warehouses[warehouseId].localItems += completedOutboundItems.reduce(
+          (sum: number, item: any) => sum + Math.max(0, Number(item?.qty) || 0),
+          0
+        );
+      });
+
+      const rows = [warehouses.AKL, warehouses.CHC].map((row: any) => ({
+        ...row,
+        totalTransactions: row.onlineOrders + row.localRequests,
+        totalItems: row.onlineItems + row.localItems
+      }));
+      const totals = rows.reduce(
+        (summary: any, row: any) => ({
+          onlineOrders: summary.onlineOrders + row.onlineOrders,
+          onlineItems: summary.onlineItems + row.onlineItems,
+          localRequests: summary.localRequests + row.localRequests,
+          localItems: summary.localItems + row.localItems,
+          totalTransactions: summary.totalTransactions + row.totalTransactions,
+          totalItems: summary.totalItems + row.totalItems
+        }),
+        { onlineOrders: 0, onlineItems: 0, localRequests: 0, localItems: 0, totalTransactions: 0, totalItems: 0 }
+      );
+
+      return res.json({
+        success: true,
+        date: startLocal.toFormat("yyyy-MM-dd"),
+        timezone: AUCKLAND_TIMEZONE,
+        generatedAt: nowAucklandIso(),
+        warehouses: rows,
+        totals
+      });
+    } catch (error: any) {
+      console.error("CN Dashboard Stats Error:", error);
+      return res.status(500).json({ success: false, error: error.message || "Failed to load dashboard statistics" });
     }
   });
 
@@ -823,10 +953,10 @@ async function startServer() {
       const allowedWarehouses: string[] = req.user.allowedWarehouses || [];
 
       let warehouseIds: string[] = [];
-      if (requestedWh) {
-        warehouseIds = [requestedWh];
-      } else if (isCnPortal) {
+      if (isCnPortal) {
         warehouseIds = ["AKL", "CHC"];
+      } else if (requestedWh) {
+        warehouseIds = [requestedWh];
       } else if (isSuper || allowedWarehouses.includes("*")) {
         const allSnap = await currentDb.collection("counter_pickups")
           .orderBy(view === "history" ? "updatedAt" : "createdAt", "desc")

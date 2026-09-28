@@ -39,7 +39,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [isAuthReady, setIsAuthReady] = useState(false);
-  const [activeWarehouse, setActiveWarehouseState] = useState<string | null>(() => sessionStorage.getItem('activeWarehouse'));
+  const isCnPortalContext = CN_API_ONLY || window.location.pathname.startsWith('/cn');
+  const [activeWarehouse, setActiveWarehouseState] = useState<string | null>(() =>
+    isCnPortalContext ? null : sessionStorage.getItem('activeWarehouse')
+  );
   const profileUnsubRef = useRef<(() => void) | null>(null);
 
   const buildProfileFromUser = (rawUser: any): UserProfile => ({
@@ -80,6 +83,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         // CN API-only mode: skip all Firebase dependencies.
         if (CN_API_ONLY) {
+          sessionStorage.removeItem('activeWarehouse');
+          setActiveWarehouseState(null);
           setLoading(false);
           setIsAuthReady(true);
           return;
@@ -200,6 +205,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     setToken(data.token);
     setUser(data.user);
+    if (isCnPortalContext) {
+      sessionStorage.removeItem('activeWarehouse');
+      setActiveWarehouseState(null);
+    }
     
     // Construct initial profile from user data
     setProfile(buildProfileFromUser(data.user));
@@ -261,7 +270,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   return (
     <AuthContext.Provider value={value}>
       {children}
-      {!CN_API_ONLY && user && profile && profile.allowedWarehouses && profile.allowedWarehouses.length > 1 && !activeWarehouse && (
+      {!isCnPortalContext && user && profile && profile.allowedWarehouses && profile.allowedWarehouses.length > 1 && !activeWarehouse && (
         <WarehouseSelector 
           allowedWarehouses={profile.allowedWarehouses} 
           onSelect={setActiveWarehouse} 

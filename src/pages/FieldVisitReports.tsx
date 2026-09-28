@@ -381,6 +381,7 @@ export const FieldVisitReports: React.FC = () => {
   useEffect(() => {
     if (!mapRef.current || !markerLayerRef.current || !window.L) return;
 
+    const L = window.L;
     const map = mapRef.current;
     const markerLayer = markerLayerRef.current;
     markerLayer.clearLayers();

@@ -137,6 +137,7 @@ export const Orders = () => {
   const [overdueThreshold, setOverdueThreshold] = useState(location.state?.overdueThreshold || 7);
   const [paymentMethodFilter, setPaymentMethodFilter] = useState('All');
   const [storeFilter, setStoreFilter] = useState('All');
+  const [warehouseFilter, setWarehouseFilter] = useState('All');
   const [stores, setStores] = useState<{id: string, name: string}[]>([]);
   const [selectedOrderIds, setSelectedOrderIds] = useState<string[]>([]);
   const [bulkUpdating, setBulkUpdating] = useState(false);
@@ -184,6 +185,8 @@ export const Orders = () => {
   const cnText = {
     orderManagement: isCnApiMode ? '订单管理' : 'Order Management',
     warehouse: isCnApiMode ? '仓库' : 'Warehouse',
+    allWarehouses: isCnApiMode ? '全部仓库' : 'All Warehouses',
+    unassignedWarehouse: isCnApiMode ? '未分配仓库' : 'Unassigned',
     bulkImport: isCnApiMode ? '批量导入' : 'Bulk Import',
     newOrder: isCnApiMode ? '新建订单' : 'New Order',
     export: isCnApiMode ? '导出' : 'Export',
@@ -205,7 +208,7 @@ export const Orders = () => {
     payment: isCnApiMode ? '付款' : 'Payment',
     total: isCnApiMode ? '总额' : 'Total',
     status: isCnApiMode ? '状态' : 'Status',
-    warehouseStatus: isCnApiMode ? '仓库状态' : 'Warehouse Status',
+    warehouseStatus: isCnApiMode ? '仓库 / 拣货状态' : 'Warehouse Status',
     action: isCnApiMode ? '操作' : 'Action',
     confirmPickup: isCnApiMode ? '确认提货' : 'Confirm Pickup',
     sendPickupEmail: isCnApiMode ? '发送提货邮件' : 'Send Pickup Email',
@@ -225,6 +228,7 @@ export const Orders = () => {
     setSearchTerm('');
     setPaymentMethodFilter('All');
     setStoreFilter('All');
+    setWarehouseFilter('All');
     setDateRange({ start: '', end: '' });
   }, [location.state]);
 
@@ -281,7 +285,7 @@ export const Orders = () => {
     if (!token) return;
     setLoading(true);
     try {
-      const cacheScope = isCnApiMode ? 'cn' : 'nz';
+      const cacheScope = isCnApiMode ? 'cn-all-v2' : 'nz';
       const warehouseScope = isCnApiMode ? 'all-warehouses' : activeWarehouse;
       const cacheKey = `orders:${cacheScope}:${user?.uid || 'anon'}:${warehouseScope}`;
       const cached = await getOrderCache(cacheKey);
@@ -401,6 +405,8 @@ export const Orders = () => {
 
       const matchesPaymentMethod = paymentMethodFilter === 'All' || order.paymentMethod === paymentMethodFilter;
       const matchesStore = storeFilter === 'All' || order.storeId === storeFilter || order.storeName === storeFilter;
+      const matchesWarehouse = warehouseFilter === 'All' ||
+        (warehouseFilter === 'Unassigned' ? !order.warehouseId : order.warehouseId === warehouseFilter);
       
       let matchesDate = true;
       if (order.createdTime) {
@@ -416,7 +422,7 @@ export const Orders = () => {
         matchesDate = !dateRange.start && !dateRange.end;
       }
       
-      return matchesSearch && matchesStatus && matchesDate && matchesPaymentMethod && matchesStore;
+      return matchesSearch && matchesStatus && matchesDate && matchesPaymentMethod && matchesStore && matchesWarehouse;
     });
 
     return result.sort((a, b) => {
@@ -428,11 +434,11 @@ export const Orders = () => {
       const timeB = b.createdTime ? new Date(b.createdTime).getTime() : 0;
       return timeB - timeA;
     });
-  }, [orders, debouncedSearchTerm, statusFilter, dateRange, paymentMethodFilter, storeFilter, overdueThreshold]);
+  }, [orders, debouncedSearchTerm, statusFilter, dateRange, paymentMethodFilter, storeFilter, warehouseFilter, overdueThreshold]);
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [debouncedSearchTerm, statusFilter, dateRange.start, dateRange.end, paymentMethodFilter, storeFilter]);
+  }, [debouncedSearchTerm, statusFilter, dateRange.start, dateRange.end, paymentMethodFilter, storeFilter, warehouseFilter]);
 
   const totalPages = Math.max(1, Math.ceil(filteredOrders.length / PAGE_SIZE));
 
@@ -1091,7 +1097,8 @@ export const Orders = () => {
           </div>
 
           <div className={cn(
-            "grid grid-cols-1 md:grid-cols-4 gap-4 transition-all duration-300 ease-in-out overflow-hidden",
+            "grid grid-cols-1 gap-4 transition-all duration-300 ease-in-out overflow-hidden",
+            isCnApiMode ? "md:grid-cols-5" : "md:grid-cols-4",
             isScrolled 
               ? "h-0 opacity-0 mt-0 group-hover:h-auto group-hover:opacity-100 group-hover:mt-4" 
               : "h-auto opacity-100 mt-4"
@@ -1155,6 +1162,21 @@ export const Orders = () => {
                 ))}
               </select>
             </div>
+            {isCnApiMode && (
+              <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
+                <MapPin className="w-5 h-5 text-slate-400" />
+                <select
+                  value={warehouseFilter}
+                  onChange={(e) => setWarehouseFilter(e.target.value)}
+                  className="bg-transparent outline-none text-sm flex-1 font-medium"
+                >
+                  <option value="All">{cnText.allWarehouses}</option>
+                  <option value="AKL">Auckland (AKL)</option>
+                  <option value="CHC">Christchurch (CHC)</option>
+                  <option value="Unassigned">{cnText.unassignedWarehouse}</option>
+                </select>
+              </div>
+            )}
           </div>
         </div>
       </PageHeader>
@@ -1294,12 +1316,19 @@ export const Orders = () => {
                           </span>
                         </td>
                         <td className="px-6 py-4" onClick={() => navigate(getOrderDetailPath(order.id))}>
-                          <span className={cn(
-                            "px-2.5 py-1 rounded-full text-xs font-bold",
-                            getWarehouseStatusBadgeClass(order)
-                          )}>
-                            {getWarehouseStatusLabel(order)}
-                          </span>
+                          <div className="flex flex-col items-start gap-1.5">
+                            {isCnApiMode && (
+                              <span className="px-2.5 py-1 rounded-full text-[10px] font-black bg-indigo-50 text-indigo-700 border border-indigo-100">
+                                {order.warehouseId ? getWarehouseDisplayName(order.warehouseId) : cnText.unassignedWarehouse}
+                              </span>
+                            )}
+                            <span className={cn(
+                              "px-2.5 py-1 rounded-full text-xs font-bold",
+                              getWarehouseStatusBadgeClass(order)
+                            )}>
+                              {getWarehouseStatusLabel(order)}
+                            </span>
+                          </div>
                         </td>
                         <td className="px-6 py-4 text-right" onClick={(e) => e.stopPropagation()}>
                           <div className="flex items-center justify-end gap-2">
@@ -1444,6 +1473,14 @@ export const Orders = () => {
                         {getWarehouseStatusLabel(order)}
                       </span>
                     </div>
+                    {isCnApiMode && (
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-slate-500">仓库</span>
+                        <span className="font-bold text-indigo-700">
+                          {order.warehouseId ? getWarehouseDisplayName(order.warehouseId) : cnText.unassignedWarehouse}
+                        </span>
+                      </div>
+                    )}
                   </div>
 
                   <div className="pt-4 border-t border-slate-50 flex items-center justify-between">
