@@ -41,6 +41,53 @@ type FinalizeItemAction = {
   comment: string;
 };
 
+type FinalizePayload = {
+  sourceType: CounterPickupSourceType;
+  requestType: CounterPickupRequestType;
+  outcome: '' | CounterPickupOutcome;
+  orderNumber: string;
+  comment: string;
+  itemActions: Array<{
+    outcome: '' | CounterPickupOutcome;
+    orderNumber: string;
+    comment: string;
+  }>;
+};
+
+type OrderMatchComparisonRow = {
+  sku: string;
+  productName: string;
+  counterQty: number;
+  orderQty: number;
+  result: 'match' | 'missingFromCounter' | 'missingFromOrder' | 'quantityMismatch';
+};
+
+type OrderMatchPreview = {
+  found: boolean;
+  bookingNumber: string;
+  mergeEligible: boolean;
+  reasons: string[];
+  comparison: {
+    exactMatch: boolean;
+    rows: OrderMatchComparisonRow[];
+  };
+  order: {
+    bookingNumber: string;
+    customerName: string;
+    status: string;
+    paymentStatus: string;
+    warehouseId: string | null;
+    warehouseStatus: string | null;
+    pickupDateScheduled: string | null;
+  };
+  counterPickup: {
+    id: string;
+    warehouseId: string | null;
+    pickedBy: string | null;
+    pickedAt: string | null;
+  };
+};
+
 type CounterPickupItem = {
   sku: string;
   qty: number;
@@ -114,6 +161,22 @@ const createDefaultItemAction = (): FinalizeItemAction => ({
   orderNumber: '',
   comment: '',
 });
+
+const MATCH_REASON_LABELS: Record<string, string> = {
+  ITEMS_DIFFERENT: 'The SKU or quantity does not exactly match this Counter Pickup.',
+  PAYMENT_REQUIRED: 'The existing order is not marked Paid.',
+  ORDER_CANCELLED: 'The existing order has been cancelled.',
+  ORDER_ALREADY_CLOSED: 'The existing order is no longer in Created status.',
+  PARTIAL_PICKUP_ACTIVE: 'The existing order has an active partial-pickup workflow.',
+  WAREHOUSE_CONFLICT: 'The existing order belongs to a different warehouse.',
+};
+
+const MATCH_RESULT_LABELS: Record<OrderMatchComparisonRow['result'], string> = {
+  match: 'Exact match',
+  missingFromCounter: 'Missing from Counter Pickup',
+  missingFromOrder: 'Not in MVNZ order',
+  quantityMismatch: 'Quantity differs',
+};
 
 const createEmptyDraft = (): CounterPickupItemDraft => ({
   skuQuery: '',
@@ -359,6 +422,8 @@ export const CounterPickupListing: React.FC = () => {
   const [editingFinalizeMeta, setEditingFinalizeMeta] = useState(false);
   const [itemFinalizeActions, setItemFinalizeActions] = useState<FinalizeItemAction[]>([]);
   const [splitPerItem, setSplitPerItem] = useState(false);
+  const [orderMatchPreview, setOrderMatchPreview] = useState<OrderMatchPreview | null>(null);
+  const [pendingFinalizePayload, setPendingFinalizePayload] = useState<FinalizePayload | null>(null);
   const [isScrolled, setIsScrolled] = useState(false);
 
   const sentinelRef = useRef<HTMLDivElement>(null);
@@ -583,6 +648,41 @@ export const CounterPickupListing: React.FC = () => {
     }
   };
 
+  const resetFinalizeState = () => {
+    setFinalizeTarget(null);
+    setFinalizeForm(emptyFinalizeForm);
+    setFinalizeMeta({ requestType: 'counterPickup', sourceType: 'metav' });
+    setEditingFinalizeMeta(false);
+    setItemFinalizeActions([]);
+    setSplitPerItem(false);
+    setOrderMatchPreview(null);
+    setPendingFinalizePayload(null);
+  };
+
+  const submitFinalize = async (endpoint: 'finalize' | 'finalize-merge', payload: FinalizePayload) => {
+    if (!token || !finalizeTarget) return;
+    setSubmitting(true);
+    try {
+      const response = await fetch(`/api/counter-pickups/${finalizeTarget.id}/${endpoint}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-v2-auth-token': `Bearer ${token}`,
+          'x-warehouse-id': activeWarehouse || ''
+        },
+        body: JSON.stringify(payload)
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.error || text.finalizeError);
+      resetFinalizeState();
+      await loadRequests(view);
+    } catch (err: any) {
+      alert(err.message || text.finalizeError);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   const handleFinalize = async () => {
     if (!token || !finalizeTarget) return;
     const targetItems = finalizeTarget.items?.length ? finalizeTarget.items : [{
@@ -596,42 +696,76 @@ export const CounterPickupListing: React.FC = () => {
       const itemAction = itemFinalizeActions[index] || createDefaultItemAction();
       return {
         outcome: itemAction.outcome || finalizeForm.outcome,
-        orderNumber: itemAction.orderNumber || finalizeForm.orderNumber,
+        orderNumber: applyOrderNumberPrefix(
+          finalizeMeta.sourceType,
+          itemAction.orderNumber || finalizeForm.orderNumber
+        ),
         comment: itemAction.comment || finalizeForm.comment
       };
     });
+    const payload: FinalizePayload = {
+      sourceType: finalizeMeta.sourceType,
+      requestType: finalizeMeta.requestType,
+      outcome: finalizeForm.outcome,
+      orderNumber: applyOrderNumberPrefix(finalizeMeta.sourceType, finalizeForm.orderNumber),
+      comment: finalizeForm.comment,
+      itemActions: normalizedActions
+    };
+
+    const orderNumbers = normalizedActions.map((action) => action.orderNumber).filter(Boolean);
+    if (!payload.orderNumber && orderNumbers.length > 0 && new Set(orderNumbers).size === 1) {
+      payload.orderNumber = orderNumbers[0];
+    }
+    const shouldCheckExistingOrder =
+      !isCnRoute &&
+      payload.sourceType === 'metav' &&
+      normalizedActions.length > 0 &&
+      normalizedActions.every((action) => action.outcome === 'sold') &&
+      orderNumbers.length === normalizedActions.length &&
+      new Set(orderNumbers).size === 1;
+
+    if (!shouldCheckExistingOrder) {
+      await submitFinalize('finalize', payload);
+      return;
+    }
 
     setSubmitting(true);
     try {
-      const response = await fetch(`/api/counter-pickups/${finalizeTarget.id}/finalize`, {
+      const bookingNumber = orderNumbers[0];
+      const response = await fetch(`/api/counter-pickups/${finalizeTarget.id}/match-order`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'x-v2-auth-token': `Bearer ${token}`,
           'x-warehouse-id': activeWarehouse || ''
         },
-        body: JSON.stringify({
-          sourceType: finalizeMeta.sourceType,
-          requestType: finalizeMeta.requestType,
-          outcome: finalizeForm.outcome,
-          orderNumber: applyOrderNumberPrefix(finalizeMeta.sourceType, finalizeForm.orderNumber),
-          comment: finalizeForm.comment,
-          itemActions: normalizedActions
-        })
+        body: JSON.stringify({ orderNumber: bookingNumber })
       });
       const data = await response.json();
-      if (!response.ok || !data.success) throw new Error(data.error || text.finalizeError);
-      setFinalizeTarget(null);
-      setFinalizeForm(emptyFinalizeForm);
-      setFinalizeMeta({ requestType: 'counterPickup', sourceType: 'metav' });
-      setEditingFinalizeMeta(false);
-      setItemFinalizeActions([]);
-      await loadRequests(view);
+      if (!response.ok || !data.success) throw new Error(data.error || 'Failed to compare the MVNZ order.');
+      if (!data.found) {
+        setSubmitting(false);
+        await submitFinalize('finalize', payload);
+        return;
+      }
+      setPendingFinalizePayload(payload);
+      setOrderMatchPreview(data as OrderMatchPreview);
     } catch (err: any) {
       alert(err.message || text.finalizeError);
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const handleKeepSeparate = async () => {
+    if (!pendingFinalizePayload) return;
+    setOrderMatchPreview(null);
+    await submitFinalize('finalize', pendingFinalizePayload);
+  };
+
+  const handleMergeExistingOrder = async () => {
+    if (!pendingFinalizePayload || !orderMatchPreview?.mergeEligible) return;
+    await submitFinalize('finalize-merge', pendingFinalizePayload);
   };
 
   const isFinalizeItemActionValid = (itemAction: FinalizeItemAction) => {
@@ -2001,12 +2135,7 @@ export const CounterPickupListing: React.FC = () => {
 
             <div className="flex justify-end gap-3">
               <button
-                onClick={() => {
-                  setFinalizeTarget(null);
-                  setFinalizeForm(emptyFinalizeForm);
-                  setFinalizeMeta({ requestType: 'counterPickup', sourceType: 'metav' });
-                  setEditingFinalizeMeta(false);
-                }}
+                onClick={resetFinalizeState}
                 className="px-4 py-2.5 bg-slate-100 text-slate-700 rounded-xl font-semibold"
               >
                 {text.cancel}
@@ -2017,6 +2146,163 @@ export const CounterPickupListing: React.FC = () => {
                 className="px-4 py-2.5 bg-indigo-600 text-white rounded-xl font-semibold hover:bg-indigo-700 transition-all disabled:opacity-50"
               >
                 {text.submit}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {orderMatchPreview && finalizeTarget && (
+        <div className="fixed inset-0 z-[60] bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-3 sm:p-6">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl max-h-[94vh] overflow-hidden flex flex-col">
+            <div className="px-5 sm:px-7 py-5 border-b border-slate-200 bg-slate-50">
+              <div className="flex items-start gap-3">
+                <div className={cn(
+                  'mt-0.5 h-10 w-10 shrink-0 rounded-xl flex items-center justify-center',
+                  orderMatchPreview.mergeEligible ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'
+                )}>
+                  <AlertTriangle className="h-5 w-5" />
+                </div>
+                <div>
+                  <h2 className="text-xl font-bold text-slate-900">Existing MVNZ Order Found</h2>
+                  <p className="mt-1 text-sm text-slate-600">
+                    Compare both records before deciding whether this Counter Pickup fulfilled {orderMatchPreview.bookingNumber}.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-5 sm:px-7 py-5 space-y-5">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <section className="rounded-xl border border-slate-200 p-4">
+                  <div className="text-xs font-bold uppercase tracking-wide text-slate-500">Existing Order</div>
+                  <div className="mt-1 text-lg font-bold text-slate-900">{orderMatchPreview.order.bookingNumber}</div>
+                  <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+                    <dt className="text-slate-500">Customer</dt>
+                    <dd className="font-medium text-slate-900 text-right break-words">{orderMatchPreview.order.customerName}</dd>
+                    <dt className="text-slate-500">Payment</dt>
+                    <dd className="font-medium text-right">{orderMatchPreview.order.paymentStatus}</dd>
+                    <dt className="text-slate-500">Order status</dt>
+                    <dd className="font-medium text-right">{orderMatchPreview.order.status}</dd>
+                    <dt className="text-slate-500">Warehouse</dt>
+                    <dd className="font-medium text-right">{orderMatchPreview.order.warehouseId || 'Unassigned'}</dd>
+                    <dt className="text-slate-500">Warehouse status</dt>
+                    <dd className="font-medium text-right">{orderMatchPreview.order.warehouseStatus || '-'}</dd>
+                    <dt className="text-slate-500">Pickup date</dt>
+                    <dd className="font-medium text-right">{orderMatchPreview.order.pickupDateScheduled || '-'}</dd>
+                  </dl>
+                </section>
+
+                <section className="rounded-xl border border-slate-200 p-4">
+                  <div className="text-xs font-bold uppercase tracking-wide text-slate-500">Counter Pickup</div>
+                  <div className="mt-1 text-lg font-bold text-slate-900">{orderMatchPreview.counterPickup.id}</div>
+                  <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+                    <dt className="text-slate-500">Warehouse</dt>
+                    <dd className="font-medium text-right">{orderMatchPreview.counterPickup.warehouseId || 'Unassigned'}</dd>
+                    <dt className="text-slate-500">Picked by</dt>
+                    <dd className="font-medium text-right">{orderMatchPreview.counterPickup.pickedBy || '-'}</dd>
+                    <dt className="text-slate-500">Picked at</dt>
+                    <dd className="font-medium text-right">
+                      {orderMatchPreview.counterPickup.pickedAt ? formatDate(orderMatchPreview.counterPickup.pickedAt, 'yyyy-MM-dd HH:mm') : '-'}
+                    </dd>
+                    <dt className="text-slate-500">Requested outcome</dt>
+                    <dd className="font-medium text-right">Sold</dd>
+                  </dl>
+                </section>
+              </div>
+
+              <section className="rounded-xl border border-slate-200 overflow-hidden">
+                <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="font-bold text-slate-900">SKU and Quantity Comparison</h3>
+                    <p className="text-xs text-slate-500 mt-0.5">Every SKU and quantity must match exactly before merging.</p>
+                  </div>
+                  <span className={cn(
+                    'shrink-0 px-2.5 py-1 rounded-full text-xs font-bold',
+                    orderMatchPreview.comparison.exactMatch
+                      ? 'bg-emerald-100 text-emerald-700'
+                      : 'bg-amber-100 text-amber-800'
+                  )}>
+                    {orderMatchPreview.comparison.exactMatch ? 'Exact match' : 'Differences found'}
+                  </span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[640px] text-sm">
+                    <thead className="bg-white text-xs uppercase tracking-wide text-slate-500">
+                      <tr>
+                        <th className="px-4 py-3 text-left">SKU</th>
+                        <th className="px-4 py-3 text-left">Product</th>
+                        <th className="px-4 py-3 text-center">MVNZ Qty</th>
+                        <th className="px-4 py-3 text-center">Counter Qty</th>
+                        <th className="px-4 py-3 text-left">Result</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {orderMatchPreview.comparison.rows.map((row) => (
+                        <tr key={row.sku} className={row.result === 'match' ? 'bg-emerald-50/40' : 'bg-amber-50'}>
+                          <td className="px-4 py-3 font-bold text-slate-900">{row.sku}</td>
+                          <td className="px-4 py-3 text-slate-600 max-w-[280px] truncate" title={row.productName}>{row.productName || '-'}</td>
+                          <td className="px-4 py-3 text-center font-semibold">{row.orderQty}</td>
+                          <td className="px-4 py-3 text-center font-semibold">{row.counterQty}</td>
+                          <td className="px-4 py-3">
+                            <span className={cn(
+                              'inline-flex px-2 py-1 rounded-full text-xs font-semibold',
+                              row.result === 'match' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-800'
+                            )}>
+                              {MATCH_RESULT_LABELS[row.result]}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              {orderMatchPreview.reasons.length > 0 ? (
+                <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
+                  <div className="font-bold text-amber-900">This order cannot be merged automatically</div>
+                  <ul className="mt-2 space-y-1 text-sm text-amber-800">
+                    {orderMatchPreview.reasons.map((reason) => (
+                      <li key={reason}>- {MATCH_REASON_LABELS[reason] || reason}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : (
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
+                  <span className="font-bold">Eligible to merge.</span> Confirming will finalize this Counter Pickup and mark the existing MVNZ order as Picked Up with warehouse status Picked. No items or prices will be added to the order.
+                </div>
+              )}
+            </div>
+
+            <div className="px-5 sm:px-7 py-4 border-t border-slate-200 bg-white flex flex-col-reverse sm:flex-row sm:justify-end gap-2.5">
+              <button
+                type="button"
+                onClick={() => {
+                  setOrderMatchPreview(null);
+                  setPendingFinalizePayload(null);
+                }}
+                disabled={submitting}
+                className="px-4 py-2.5 rounded-xl bg-slate-100 text-slate-700 font-semibold disabled:opacity-50"
+              >
+                Back to Finalize
+              </button>
+              <button
+                type="button"
+                onClick={handleKeepSeparate}
+                disabled={submitting}
+                className="px-4 py-2.5 rounded-xl border border-slate-300 bg-white text-slate-800 font-semibold hover:bg-slate-50 disabled:opacity-50"
+              >
+                Keep as Separate Record
+              </button>
+              <button
+                type="button"
+                onClick={handleMergeExistingOrder}
+                disabled={submitting || !orderMatchPreview.mergeEligible}
+                className="px-4 py-2.5 rounded-xl bg-emerald-600 text-white font-semibold hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center justify-center gap-2"
+              >
+                {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
+                Confirm Same Order & Complete
               </button>
             </div>
           </div>

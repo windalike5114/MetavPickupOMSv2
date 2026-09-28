@@ -157,6 +157,45 @@ const normalizeCounterPickupOrderNumber = (sourceType: any, value: any) => {
   return raw.startsWith(prefix) ? raw : `${prefix}${raw}`;
 };
 
+const aggregateItemsBySku = (items: any[]) => {
+  const totals = new Map<string, { sku: string; qty: number; productName: string }>();
+  (Array.isArray(items) ? items : []).forEach((item: any) => {
+    const sku = String(item?.sku || "").trim().toUpperCase();
+    if (!sku) return;
+    const existing = totals.get(sku);
+    const qty = Math.max(0, Number(item?.qty) || 0);
+    totals.set(sku, {
+      sku,
+      qty: (existing?.qty || 0) + qty,
+      productName: existing?.productName || String(item?.productName || "").trim()
+    });
+  });
+  return totals;
+};
+
+const compareCounterPickupItemsToOrder = (counterItems: any[], orderItems: any[]) => {
+  const counterTotals = aggregateItemsBySku(counterItems);
+  const orderTotals = aggregateItemsBySku(orderItems);
+  const skuSet = new Set([...counterTotals.keys(), ...orderTotals.keys()]);
+  const rows = Array.from(skuSet).sort().map((sku) => {
+    const counterItem = counterTotals.get(sku);
+    const orderItem = orderTotals.get(sku);
+    const counterQty = counterItem?.qty || 0;
+    const orderQty = orderItem?.qty || 0;
+    return {
+      sku,
+      productName: orderItem?.productName || counterItem?.productName || "",
+      counterQty,
+      orderQty,
+      result: counterQty === orderQty ? "match" : counterQty === 0 ? "missingFromCounter" : orderQty === 0 ? "missingFromOrder" : "quantityMismatch"
+    };
+  });
+  return {
+    exactMatch: rows.length > 0 && rows.every((row) => row.result === "match"),
+    rows
+  };
+};
+
 const resolveSkuLocationForWarehouse = (skuData: any, warehouseId?: string | null) => {
   const wh = warehouseId || "AKL";
   const warehouseLocation = skuData?.locations?.[wh];
@@ -1226,6 +1265,275 @@ async function startServer() {
     } catch (error: any) {
       console.error("Counter Pickup Mark Picked Error:", error);
       return res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.post("/api/counter-pickups/:id/match-order", authenticate, async (req: any, res) => {
+    const currentDb = await initDb();
+    if (!currentDb) return res.status(503).json({ success: false, error: "Database not initialized" });
+
+    try {
+      if (isCnPortalRequest(req)) {
+        return res.status(403).json({ success: false, error: "Order matching is only available in the NZ portal" });
+      }
+      if (!isFrontDeskRole(req.user)) {
+        return res.status(403).json({ success: false, error: "Forbidden: Reception access required" });
+      }
+
+      const counterRef = currentDb.collection("counter_pickups").doc(req.params.id);
+      const counterSnap = await counterRef.get();
+      if (!counterSnap.exists) return res.status(404).json({ success: false, error: "Counter pickup not found" });
+      const counter = counterSnap.data() as any;
+      const requestedWh = String(req.headers["x-warehouse-id"] || "");
+      const isSuper = SUPER_ADMINS.includes((req.user.username || "").toLowerCase());
+      const allowedWarehouses: string[] = req.user.allowedWarehouses || [];
+      if (counter.warehouseId && requestedWh && counter.warehouseId !== requestedWh) {
+        return res.status(403).json({ success: false, error: "Forbidden: Counter pickup belongs to a different warehouse" });
+      }
+      if (!isSuper && counter.warehouseId && !allowedWarehouses.includes("*") && !allowedWarehouses.includes(counter.warehouseId)) {
+        return res.status(403).json({ success: false, error: "Forbidden: You do not have access to this warehouse" });
+      }
+      if (counter.status !== "Picked") {
+        return res.status(409).json({ success: false, error: "Only Picked requests can be matched to an order" });
+      }
+
+      const bookingNumber = normalizeCounterPickupOrderNumber("metav", req.body?.orderNumber || "");
+      if (!bookingNumber) return res.status(400).json({ success: false, error: "MVNZ Order Number is required" });
+      const orderSnap = await currentDb.collection("orders").doc(bookingNumber).get();
+      if (!orderSnap.exists) {
+        return res.json({ success: true, found: false, bookingNumber });
+      }
+
+      const order = { id: orderSnap.id, ...orderSnap.data() } as any;
+      const counterItems = Array.isArray(counter.items) && counter.items.length
+        ? counter.items
+        : [{ sku: counter.sku, productName: counter.productName, qty: counter.qty, location: counter.location }];
+      const comparison = compareCounterPickupItemsToOrder(counterItems, order.items || []);
+      const warehouseCompatible = !order.warehouseId || order.warehouseId === counter.warehouseId;
+      const reasons: string[] = [];
+      if (!comparison.exactMatch) reasons.push("ITEMS_DIFFERENT");
+      if (order.paymentStatus !== "Paid") reasons.push("PAYMENT_REQUIRED");
+      if (order.status !== "Created") reasons.push(order.status === "Cancelled" ? "ORDER_CANCELLED" : "ORDER_ALREADY_CLOSED");
+      if (order.pickupExceptionStatus) reasons.push("PARTIAL_PICKUP_ACTIVE");
+      if (!warehouseCompatible) reasons.push("WAREHOUSE_CONFLICT");
+
+      return res.json({
+        success: true,
+        found: true,
+        bookingNumber,
+        mergeEligible: reasons.length === 0,
+        reasons,
+        comparison,
+        order: {
+          id: orderSnap.id,
+          bookingNumber: order.bookingNumber || orderSnap.id,
+          customerName: order.customerName || "N/A",
+          status: order.status || "N/A",
+          paymentStatus: order.paymentStatus || "N/A",
+          warehouseId: order.warehouseId || null,
+          warehouseStatus: order.warehouseStatus || null,
+          pickupDateScheduled: order.pickupDateScheduled || null,
+          items: Array.isArray(order.items) ? order.items.map((item: any) => ({
+            sku: item.sku,
+            productName: item.productName || "",
+            qty: Number(item.qty) || 0
+          })) : []
+        },
+        counterPickup: {
+          id: counter.id || counterSnap.id,
+          warehouseId: counter.warehouseId || null,
+          pickedBy: counter.pickedBy || null,
+          pickedAt: counter.pickedAt || null,
+          items: counterItems.map((item: any) => ({
+            sku: item.sku,
+            productName: item.productName || "",
+            qty: Number(item.qty) || 0
+          }))
+        }
+      });
+    } catch (error: any) {
+      console.error("Counter Pickup Order Match Error:", error);
+      return res.status(500).json({ success: false, error: error.message || "Failed to compare MVNZ order" });
+    }
+  });
+
+  app.post("/api/counter-pickups/:id/finalize-merge", authenticate, async (req: any, res) => {
+    const currentDb = await initDb();
+    if (!currentDb) return res.status(503).json({ success: false, error: "Database not initialized" });
+
+    try {
+      if (isCnPortalRequest(req)) {
+        return res.status(403).json({ success: false, error: "Order merging is only available in the NZ portal" });
+      }
+      if (!isFrontDeskRole(req.user)) {
+        return res.status(403).json({ success: false, error: "Forbidden: Reception access required" });
+      }
+
+      const sourceType = normalizeCounterPickupSourceType(req.body?.sourceType);
+      if (sourceType !== "metav") {
+        return res.status(400).json({ success: false, error: "Only Metav orders can be merged" });
+      }
+      const requestType = normalizeCounterPickupRequestType(req.body?.requestType);
+      const defaultOutcome = normalizeCounterPickupOutcome(req.body?.outcome || req.body?.destination || "");
+      const comment = String(req.body?.comment || "").trim();
+      const itemActions = Array.isArray(req.body?.itemActions) ? req.body.itemActions : [];
+      const bookingNumber = normalizeCounterPickupOrderNumber("metav", req.body?.orderNumber || "");
+      if (!bookingNumber) return res.status(400).json({ success: false, error: "MVNZ Order Number is required" });
+
+      const counterRef = currentDb.collection("counter_pickups").doc(req.params.id);
+      const orderRef = currentDb.collection("orders").doc(bookingNumber);
+      const counterLogRef = counterRef.collection("logs").doc();
+      const counterGlobalLogRef = currentDb.collection("logs").doc();
+      const orderLogRef = currentDb.collection("logs").doc();
+      const timestamp = nowAucklandIso();
+      const operatorName = req.user.name || req.user.username;
+      const requestedWh = String(req.headers["x-warehouse-id"] || "");
+      const isSuper = SUPER_ADMINS.includes((req.user.username || "").toLowerCase());
+      const allowedWarehouses: string[] = req.user.allowedWarehouses || [];
+
+      await currentDb.runTransaction(async (tx) => {
+        const [counterSnap, orderSnap] = await Promise.all([
+          tx.get(counterRef),
+          tx.get(orderRef)
+        ]);
+        if (!counterSnap.exists) throw new Error("Counter pickup not found");
+        if (!orderSnap.exists) throw new Error(`MVNZ order ${bookingNumber} no longer exists`);
+
+        const counter = counterSnap.data() as any;
+        const order = orderSnap.data() as any;
+        if (counter.status !== "Picked") throw new Error("Counter pickup is no longer ready to finalize");
+        if (counter.warehouseId && requestedWh && counter.warehouseId !== requestedWh) {
+          throw new Error("Counter pickup belongs to a different warehouse");
+        }
+        if (!isSuper && counter.warehouseId && !allowedWarehouses.includes("*") && !allowedWarehouses.includes(counter.warehouseId)) {
+          throw new Error("You do not have access to this warehouse");
+        }
+        if (order.status !== "Created") throw new Error("MVNZ order is no longer in Created status");
+        if (order.paymentStatus !== "Paid") throw new Error("MVNZ order must be Paid before it can be merged");
+        if (order.pickupExceptionStatus) throw new Error("MVNZ order has an active partial pickup workflow");
+        if (order.warehouseId && order.warehouseId !== counter.warehouseId) {
+          throw new Error("MVNZ order belongs to a different warehouse");
+        }
+
+        const counterItems = Array.isArray(counter.items) && counter.items.length
+          ? counter.items
+          : [{ sku: counter.sku, productName: counter.productName, qty: counter.qty, location: counter.location }];
+        const comparison = compareCounterPickupItemsToOrder(counterItems, order.items || []);
+        if (!comparison.exactMatch) throw new Error("MVNZ order items changed; review the comparison and keep the records separate");
+
+        const normalizedActions = counterItems.map((_: any, index: number) => {
+          const raw = itemActions[index] || {};
+          return {
+            outcome: normalizeCounterPickupOutcome(raw.outcome || raw.destination || defaultOutcome),
+            orderNumber: normalizeCounterPickupOrderNumber("metav", raw.orderNumber || raw.referenceNo || bookingNumber),
+            comment: String(raw.comment || raw.otherNotes || comment || "").trim()
+          };
+        });
+        if (normalizedActions.some((action: any) => action.outcome !== "sold" || action.orderNumber !== bookingNumber)) {
+          throw new Error("All merged items must be Sold under the same MVNZ order number");
+        }
+
+        const finalizedItems = counterItems.map((item: any, index: number) => ({
+          ...item,
+          requestType,
+          outcome: "sold",
+          destination: requestType === "scheduledDelivery" ? "Sent" : "Sold",
+          orderNumber: bookingNumber,
+          comment: normalizedActions[index].comment || comment || null,
+          finalizedAt: timestamp,
+          finalizedBy: operatorName,
+          completedAt: timestamp,
+          completedBy: operatorName
+        }));
+        const completedOrderItems = (Array.isArray(order.items) ? order.items : []).map((item: any) => ({
+          ...item,
+          status: "Picked"
+        }));
+        const pickingLog = {
+          ...(order.pickingLog || {}),
+          requestedAt: order.pickingLog?.requestedAt || counter.createdAt || timestamp,
+          startedAt: order.pickingLog?.startedAt || counter.createdAt || timestamp,
+          finishedAt: counter.pickedAt || timestamp,
+          pickerId: order.pickingLog?.pickerId || null,
+          pickerName: counter.pickedBy || order.pickingLog?.pickerName || "Counter Pickup"
+        };
+
+        tx.set(counterRef, {
+          sourceType: "metav",
+          requestType,
+          outcome: "sold",
+          destination: requestType === "scheduledDelivery" ? "Sent" : "Sold",
+          orderNumber: bookingNumber,
+          referenceNo: bookingNumber,
+          comment: comment || null,
+          status: "Finalized",
+          items: finalizedItems,
+          putbackItems: [],
+          putbackQty: 0,
+          finalizedAt: timestamp,
+          finalizedBy: operatorName,
+          completedAt: timestamp,
+          completedBy: operatorName,
+          linkedOrderId: orderSnap.id,
+          linkedBookingNumber: bookingNumber,
+          mergedIntoOrder: true,
+          mergedAt: timestamp,
+          mergedBy: operatorName,
+          matchResult: "Exact",
+          mergeComparison: comparison.rows,
+          updatedAt: timestamp
+        }, { merge: true });
+
+        tx.update(orderRef, {
+          items: completedOrderItems,
+          warehouseId: order.warehouseId || counter.warehouseId,
+          warehouseStatus: "Picked",
+          pickingLog,
+          status: "Picked Up",
+          statusUpdatedAt: timestamp,
+          actualPickupTime: order.actualPickupTime || timestamp,
+          pickedUpBy: operatorName,
+          pickupExceptionStatus: null,
+          counterPickupIds: admin.firestore.FieldValue.arrayUnion(counterSnap.id),
+          fulfillmentSource: "Counter Pickup",
+          counterPickupCompletedAt: timestamp,
+          updatedAt: timestamp,
+          updatedBy: req.user.username
+        });
+
+        const counterDetail = `Counter pickup ${counterSnap.id} merged into ${bookingNumber}; exact SKU and quantity match confirmed by ${operatorName}.`;
+        tx.set(counterLogRef, {
+          timestamp,
+          operator: operatorName,
+          action: "CP_MERGED_TO_ORDER",
+          detail: counterDetail
+        });
+        tx.set(counterGlobalLogRef, {
+          timestamp,
+          userId: req.user.uid,
+          userName: operatorName,
+          action: "Counter Pickup Merged",
+          category: "Counter Pickup",
+          details: counterDetail,
+          orderId: counterSnap.id
+        });
+        tx.set(orderLogRef, {
+          timestamp,
+          userId: req.user.uid,
+          userName: operatorName,
+          action: "Counter Pickup Fulfillment",
+          category: "Order",
+          details: `Order ${bookingNumber} completed through counter pickup ${counterSnap.id}; warehouse picking and customer pickup marked complete without signature.`,
+          orderId: orderSnap.id
+        });
+      });
+
+      return res.json({ success: true, bookingNumber, merged: true });
+    } catch (error: any) {
+      console.error("Counter Pickup Merge Finalize Error:", error);
+      const message = error?.message || "Failed to merge counter pickup into MVNZ order";
+      const conflict = /no longer|changed|different warehouse|active partial|must be Paid/.test(message);
+      return res.status(conflict ? 409 : 500).json({ success: false, error: message });
     }
   });
 

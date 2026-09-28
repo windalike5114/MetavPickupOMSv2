@@ -17,6 +17,88 @@
   }
 }
 
+@layer components {
+  .cn-portal-shell {
+    --cn-border: #e2e8f0;
+    --cn-muted: #64748b;
+    --cn-surface: #ffffff;
+    --cn-canvas: #f8fafc;
+    color: #0f172a;
+  }
+
+  .cn-portal-shell main > header {
+    border-color: var(--cn-border);
+  }
+
+  .cn-portal-shell main > header > div {
+    width: 100%;
+    max-width: 1500px;
+  }
+
+  .cn-portal-shell table thead {
+    background: var(--cn-canvas);
+  }
+
+  .cn-portal-shell table thead th {
+    color: #64748b;
+    font-size: 0.68rem;
+    font-weight: 800;
+    letter-spacing: 0.045em;
+  }
+
+  .cn-portal-shell table tbody tr {
+    transition: background-color 140ms ease;
+  }
+
+  .cn-portal-shell table tbody tr:hover {
+    background: #f8fafc;
+  }
+
+  .cn-portal-shell input:not([type='checkbox']):not([type='radio']),
+  .cn-portal-shell select,
+  .cn-portal-shell textarea {
+    transition: border-color 140ms ease, box-shadow 140ms ease, background-color 140ms ease;
+  }
+
+  .cn-portal-shell input:not([type='checkbox']):not([type='radio']):focus,
+  .cn-portal-shell select:focus,
+  .cn-portal-shell textarea:focus {
+    border-color: #94a3b8;
+    box-shadow: 0 0 0 3px rgba(148, 163, 184, 0.16);
+  }
+
+  .cn-portal-shell ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .cn-portal-shell ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .cn-portal-shell ::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background-clip: padding-box;
+  }
+
+  .cn-portal-shell ::-webkit-scrollbar-thumb:hover {
+    background-color: #94a3b8;
+  }
+}
+
+@media (max-width: 767px) {
+  .cn-portal-shell main > header > div {
+    padding-top: 1rem;
+    padding-bottom: 1rem;
+  }
+
+  .cn-portal-shell main > header h1 {
+    font-size: 1.35rem;
+  }
+}
+
 /* Print styles */
 @media print {
   @page {
