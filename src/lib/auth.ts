@@ -1,18 +1,21 @@
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import admin from 'firebase-admin';
+import { config } from 'dotenv';
 import { Response, NextFunction } from 'express';
 import { SUPER_ADMINS, isSuperAdmin } from './auth-shared';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'aca-pickup-secret-key-2026';
+config({ path: ['.env.local', '.env'], quiet: true });
+
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET?.trim()) {
+  throw new Error('JWT_SECRET is required. Set it in the server environment or .env.local.');
+}
 
 /**
  * Generates a JWT token valid for 30 days.
  */
 export const generateToken = (payload: any) => {
-  if (!JWT_SECRET) {
-    throw new Error("Internal Server Error: Auth configuration missing");
-  }
   return jwt.sign(payload, JWT_SECRET, { expiresIn: '30d' });
 };
 
@@ -64,9 +67,19 @@ export const authenticate = (req: any, res: Response, next: NextFunction) => {
     });
   }
 
+  let decoded: any;
   try {
     // 5. 使用 JWT 校验
-    const decoded = jwt.verify(token, JWT_SECRET) as any;
+    decoded = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] });
+  } catch (err) {
+    return res.status(401).json({
+      success: false,
+      code: err instanceof jwt.TokenExpiredError ? 'SESSION_EXPIRED' : 'SESSION_INVALID',
+      error: 'Your session has ended. Please sign in again.'
+    });
+  }
+
+  try {
     req.user = decoded;
     
     // Extract and validate warehouse if provided
@@ -83,7 +96,7 @@ export const authenticate = (req: any, res: Response, next: NextFunction) => {
     next();
   } catch (err: any) {
     console.error(`🔥 [JWT ERROR] for ${req.method} ${req.path}:`, err.message);
-    writeLog('ERROR', 'JWT Verify Error', { message: err.message, token: token.substring(0, 10) + '...' });
+    writeLog('ERROR', 'Session authorization error', { message: err.message });
     return res.status(403).json({ 
       success: false, 
       error: `Forbidden: ${err.message}`

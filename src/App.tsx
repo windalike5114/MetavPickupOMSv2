@@ -1,5 +1,5 @@
 import React from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './components/AuthProvider';
 import { Layout } from './components/Layout';
 import { Login } from './pages/Login';
@@ -114,7 +114,8 @@ const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) =
 };
 
 const ProtectedCnRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { user, isAuthReady, profile, activeWarehouse } = useAuth();
+  const { user, isAuthReady, profile } = useAuth();
+  const { pathname, search, hash } = useLocation();
 
   if (!isAuthReady) {
     return (
@@ -125,7 +126,7 @@ const ProtectedCnRoute: React.FC<{ children: React.ReactNode }> = ({ children })
     );
   }
 
-  if (!user) return <Navigate to="/login" />;
+  if (!user) return <Navigate to="/cn/login" state={{ returnTo: pathname + search + hash }} replace />;
   if (profile?.status === 'Disabled') {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4 text-center">
@@ -140,7 +141,16 @@ const ProtectedCnRoute: React.FC<{ children: React.ReactNode }> = ({ children })
   return <CnPortalLayout>{children}</CnPortalLayout>;
 };
 
+const OpenCnPortal = () => {
+  const { pathname, search, hash } = useLocation();
+  React.useEffect(() => {
+    window.location.replace(`https://cn.acapickup.com${pathname}${search}${hash}`);
+  }, [pathname, search, hash]);
+  return null;
+};
+
 export default function App() {
+  const redirectCn = ['acapickup.com', 'www.acapickup.com'].includes(window.location.hostname);
   return (
     <ErrorBoundary>
       <AuthProvider>
@@ -148,7 +158,7 @@ export default function App() {
           <Router>
             <NotificationManager />
             <Routes>
-              <Route path="/login" element={<Login />} />
+              <Route path="/login" element={CN_API_ONLY ? <Navigate to="/cn/login" replace /> : <Login />} />
               <Route path="/select-warehouse" element={<WarehouseSelection />} />
               <Route path="/guest-display" element={<GuestDisplay />} />
               <Route path="/" element={CN_API_ONLY ? <Navigate to="/cn" /> : <ProtectedRoute><Dashboard /></ProtectedRoute>} />
@@ -171,6 +181,8 @@ export default function App() {
               <Route path="/report-settings" element={<ProtectedRoute><ReportSettings /></ProtectedRoute>} />
               <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
               <Route path="/logs" element={<ProtectedRoute><OperationLogs /></ProtectedRoute>} />
+              {redirectCn ? <Route path="/cn/*" element={<OpenCnPortal />} /> : <>
+              <Route path="/cn/login" element={<Login cnPortal />} />
               <Route path="/cn" element={<ProtectedCnRoute><CnPortalHome /></ProtectedCnRoute>} />
               <Route path="/cn/orders" element={<ProtectedCnRoute><Orders /></ProtectedCnRoute>} />
               <Route path="/cn/orders/create" element={<ProtectedCnRoute><OrderCreate /></ProtectedCnRoute>} />
@@ -179,6 +191,7 @@ export default function App() {
               <Route path="/cn/overdue" element={<ProtectedCnRoute><OverdueOrders /></ProtectedCnRoute>} />
               <Route path="/cn/counter-pickups" element={<ProtectedCnRoute><CounterPickupListing /></ProtectedCnRoute>} />
               <Route path="/cn/users" element={<ProtectedCnRoute><UserManagement /></ProtectedCnRoute>} />
+              </>}
               <Route path="*" element={<Navigate to={CN_API_ONLY ? "/cn" : "/"} />} />
             </Routes>
           </Router>

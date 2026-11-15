@@ -1,10 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../components/AuthProvider';
 import { Package, Lock, User, AlertCircle, CheckCircle2, ChevronRight } from 'lucide-react';
-import { CN_API_ONLY } from '../constants';
 
-export const Login = () => {
+export const Login = ({ cnPortal = false }: { cnPortal?: boolean }) => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [rememberMe, setRememberMe] = useState(false);
@@ -12,29 +11,29 @@ export const Login = () => {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [loading, setLoading] = useState(false);
-  const { user, profile, loading: authLoading, activeWarehouse, setActiveWarehouse, clearActiveWarehouse, login, logout } = useAuth();
+  const { user, profile, loading: authLoading, activeWarehouse, sessionEnded, login } = useAuth();
   const navigate = useNavigate();
-  const [showWarehouseSelector, setShowWarehouseSelector] = useState(false);
+  const { state } = useLocation();
+  const returnTo = state?.returnTo;
+  const cnDestination = typeof returnTo === 'string' &&
+    /^\/cn(?:\/(?!login(?:[/?#]|$))|[?#]|$)/.test(returnTo) &&
+    !returnTo.includes('\\') ? returnTo : '/cn';
 
   useEffect(() => {
-    if (user && profile) {
-      if (CN_API_ONLY) {
-        navigate('/cn');
+    if (!authLoading && user && profile) {
+      if (cnPortal) {
+        navigate(cnDestination, { replace: true });
         return;
       }
       if (activeWarehouse) {
-        navigate('/');
+        navigate('/', { replace: true });
       } else {
-        navigate('/select-warehouse');
+        navigate('/select-warehouse', { replace: true });
       }
     }
-  }, [user, profile, activeWarehouse, navigate]);
+  }, [authLoading, user, profile, activeWarehouse, navigate, cnPortal, cnDestination]);
 
   useEffect(() => {
-    if (!user) {
-      clearActiveWarehouse();
-    }
-
     const savedUsername = localStorage.getItem('remembered_username');
     if (savedUsername) {
       setUsername(savedUsername);
@@ -49,25 +48,7 @@ export const Login = () => {
     setLoading(true);
 
     try {
-      const result = await login(username, password);
-      
-      console.log("API 返回的全量数据:", result);
-
-      if (result && result.token) {
-        console.log("正在存入 Token:", result.token);
-        localStorage.setItem('x-v2-auth-token', result.token);
-        localStorage.setItem('user_info', JSON.stringify(result.user));
-        
-        // Ensure warehouse is selected before entering order pages.
-        if (localStorage.getItem('x-v2-auth-token')) {
-           const savedWarehouse = sessionStorage.getItem('activeWarehouse');
-           navigate(CN_API_ONLY ? '/cn' : (savedWarehouse ? '/' : '/select-warehouse'));
-        } else {
-           alert("LocalStorage 写入失败！");
-        }
-      } else {
-        alert("API 返回的数据里没有 Token！");
-      }
+      await login(username, password);
 
       if (rememberMe) {
         localStorage.setItem('remembered_username', username);
@@ -99,12 +80,18 @@ export const Login = () => {
           >
             <Package className="w-8 h-8 text-indigo-600" />
           </div>
-          <h1 className="text-2xl font-bold text-slate-900">Pickup System</h1>
+          <h1 className="text-2xl font-bold text-slate-900">{cnPortal ? 'WMS 中国门户' : 'Pickup System'}</h1>
           <p className="text-slate-500 mt-2">
-            Internal Order Management
+            {cnPortal ? '请登录中国门户' : 'Internal Order Management'}
           </p>
         </div>
 
+
+        {sessionEnded && (
+          <p role="status" className="mb-6 rounded-lg bg-amber-50 p-4 text-sm text-amber-800">
+            {cnPortal ? '登录已过期，请重新登录。' : 'Your session has ended. Please sign in again.'}
+          </p>
+        )}
 
         {error && (
           <div className="mb-6 p-4 bg-red-50 border border-red-100 rounded-lg flex items-start gap-3 text-red-700 text-sm">
