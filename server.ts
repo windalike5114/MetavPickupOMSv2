@@ -1058,14 +1058,18 @@ async function startServer() {
         const search = String(req.query.search || "").trim().toLowerCase();
         const outboundOnly = req.query.outbound === "1" || Boolean(businessDay);
         const rows: any[] = [];
-        let cursor = after;
+        const collection = currentDb.collection("counter_pickups");
+        let cursor = after ? await collection.doc(after).get() : null;
+        if (cursor && (!cursor.exists || cursor.get("updatedAt") === undefined)) {
+          return res.status(409).json({ success: false, error: "历史记录已变更，请从第一页重试。" });
+        }
         const size = Math.min(250, Math.floor(limitValue));
-        const base = currentDb.collection("counter_pickups").orderBy(admin.firestore.FieldPath.documentId(), "desc");
+        const base = collection.orderBy("updatedAt", "desc");
         let nextCursor: string | null = null;
         for (let batchIndex = 0; batchIndex < 6; batchIndex += 1) {
           const batch = await (cursor ? base.startAfter(cursor) : base).limit(200).get();
           for (const doc of batch.docs) {
-            cursor = doc.id;
+            cursor = doc;
             const pickup = { ...doc.data(), id: doc.id } as any;
             const wh = normalizeWarehouseId(pickup.warehouseId);
             if (!wh || !["AKL", "CHC"].includes(wh) || (warehouse && wh !== warehouse)) continue;
@@ -1092,7 +1096,7 @@ async function startServer() {
             rows.push({ ...buildCounterPickupDetail(pickup), matchedItemIndexes });
           }
           if (nextCursor || batch.size < 200) break;
-          if (batchIndex === 5) nextCursor = cursor;
+          if (batchIndex === 5) nextCursor = cursor?.id ?? null;
         }
         return res.json({ success: true, requests: rows, nextCursor });
       }

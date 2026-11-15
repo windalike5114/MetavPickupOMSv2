@@ -498,7 +498,8 @@ export const CounterPickupListing: React.FC = () => {
       headers: { 'x-v2-auth-token': `Bearer ${token}` }, signal
     });
     const data = await response.json();
-    if (!response.ok || !data.success) throw new Error(data.error || text.loadError);
+    if (response.status === 409) throw new Error('历史记录已变更，请从第一页重试。');
+    if (!response.ok || !data.success) throw new Error(text.loadError);
     return { rows: (data.requests || []) as PagedPickup[], nextCursor: (data.nextCursor || null) as string | null };
   };
 
@@ -512,8 +513,8 @@ export const CounterPickupListing: React.FC = () => {
       }
       void fetchHistory(new URLSearchParams(historyQuery), currentCursor, PAGE_SIZE, controller.signal).then(result => {
         if (!controller.signal.aborted) setHistoryResult({ key: pageKey, ...result });
-      }).catch(() => {
-        if (!controller.signal.aborted) setHistoryResult({ key: pageKey, rows: [], nextCursor: null, error: text.loadError });
+      }).catch((error: unknown) => {
+        if (!controller.signal.aborted) setHistoryResult({ key: pageKey, rows: [], nextCursor: null, error: error instanceof Error ? error.message : text.loadError });
       });
     }, 200);
     return () => { window.clearTimeout(timer); controller.abort(); };
@@ -1647,7 +1648,10 @@ export const CounterPickupListing: React.FC = () => {
           )}
 
           {pagedHistory && currentHistory?.error && <div role="alert" className="rounded border bg-white p-3 text-red-700">
-            {currentHistory.error} <button type="button" className="underline" onClick={() => setHistoryRefresh(value => value + 1)}>重试</button>
+            {currentHistory.error} <button type="button" className="underline" onClick={() => {
+              setHistoryCursors({ key: historyQuery, entries: [''] });
+              setHistoryRefresh(value => value + 1);
+            }}>重试</button>
           </div>}
           {canViewPage && (listLoading ? (
             <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-12 text-center">
