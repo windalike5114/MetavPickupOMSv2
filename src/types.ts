@@ -208,6 +208,7 @@ export interface OperationLog {
 }
 
 export interface CounterPickupItem {
+  archiveEdited?: boolean;
   sku: string;
   productName: string;
   location: string;
@@ -235,6 +236,8 @@ export interface CounterPickupLog {
 }
 
 export interface CounterPickup {
+  archiveRevision?: number;
+  archiveMetadataEdited?: boolean;
   id: string;
   sku: string;
   productName: string;

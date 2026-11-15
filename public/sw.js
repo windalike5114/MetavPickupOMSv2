@@ -1,38 +1,12 @@
-const CACHE_NAME = 'wms-v2';
-const APP_SHELL = ['/', '/index.html', '/manifest.json'];
+const LEGACY_SHELL_CACHE = 'wms-v2';
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL))
-  );
-  self.skipWaiting();
+  event.waitUntil(self.skipWaiting());
 });
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(
-        keys
-          .filter((key) => key !== CACHE_NAME)
-          .map((key) => caches.delete(key))
-      )
-    )
-  );
-  self.clients.claim();
-});
-
-self.addEventListener('fetch', (event) => {
-  const { request } = event;
-  const isNavigation = request.mode === 'navigate';
-
-  // Avoid stale entry HTML on mobile.
-  if (isNavigation) {
-    event.respondWith(fetch(request).catch(() => caches.match('/index.html')));
-    return;
-  }
-
-  event.respondWith(
-    caches.match(request).then((response) => response || fetch(request))
+    caches.delete(LEGACY_SHELL_CACHE).then(() => self.clients.claim())
   );
 });
 

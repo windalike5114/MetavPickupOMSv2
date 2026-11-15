@@ -327,6 +327,8 @@ const buildCounterPickupDetail = (pickup: any) => {
   const putbackItems = Array.isArray(pickup.putbackItems) ? pickup.putbackItems : [];
   return {
     id: pickup.id,
+    archiveRevision: pickup.archiveRevision ?? 0,
+    archiveMetadataEdited: pickup.archiveMetadataEdited === true,
     sku: pickup.sku || primaryItem.sku || "",
     productName: pickup.productName || primaryItem.productName || "",
     location: pickup.location || primaryItem.location || "NOT_ASSIGNED",
@@ -1839,6 +1841,136 @@ async function startServer() {
     } catch (error: any) {
       console.error("Counter Pickup Finalize Error:", error);
       return res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+
+  app.get("/api/counter-pickups/:id/archive-log", authenticate, async (req: any, res) => {
+    const currentDb = await initDb();
+    if (!currentDb) return res.status(503).json({ success: false, error: "Database not initialized" });
+    try {
+      const ref = currentDb.collection("counter_pickups").doc(req.params.id);
+      const data = (await ref.get()).data();
+      if (!data || data.status !== "Finalized") return res.status(404).json({ success: false, error: "Archived pickup not found." });
+      const allowed: string[] = req.user.allowedWarehouses || [];
+      const isSuper = SUPER_ADMINS.includes((req.user.username || "").toLowerCase());
+      if (isCnPortalRequest(req) || (!isSuper && !allowed.includes("*") && !allowed.includes(data.warehouseId))) {
+        return res.status(403).json({ success: false, error: "You do not have access to this record." });
+      }
+      const snapshot = await ref.collection("archive_edits").orderBy("revision", "desc").get();
+      return res.json({ success: true, logs: snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) });
+    } catch (error) {
+      console.error("Counter pickup archive log failed:", error);
+      return res.status(500).json({ success: false, error: "Could not load revision history." });
+    }
+  });
+
+  app.patch("/api/counter-pickups/:id/archive", authenticate, async (req: any, res) => {
+    if (isCnPortalRequest(req) || !isFrontDeskRole(req.user)) {
+      return res.status(403).json({ success: false, error: "Reception access required." });
+    }
+    const { itemIndex, revision, outcome, orderNumber, comment, requestType, sourceType } = req.body ?? {};
+    const destinations: Record<string, string> = {
+      sold: "Sold", returnedToWarehouse: "Returned", warrantySwapParts: "Warranty / Swap / Parts", other: "Other"
+    };
+    if (!Number.isSafeInteger(itemIndex) || itemIndex < 0 || !Number.isSafeInteger(revision) || revision < 0 ||
+        typeof outcome !== "string" || (outcome !== "" && !Object.hasOwn(destinations, outcome)) ||
+        !["counterPickup", "scheduledDelivery"].includes(requestType) ||
+        !["", "metav", "offline", "blackfern", "other"].includes(sourceType) ||
+        typeof orderNumber !== "string" || orderNumber.length > 100 ||
+        typeof comment !== "string" || comment.length > 1000) {
+      return res.status(400).json({ success: false, error: "Invalid archive edit." });
+    }
+    const currentDb = await initDb();
+    if (!currentDb) return res.status(503).json({ success: false, error: "Database not initialized" });
+    const docRef = currentDb.collection("counter_pickups").doc(req.params.id);
+    try {
+      const result = await currentDb.runTransaction(async transaction => {
+        const data = (await transaction.get(docRef)).data();
+        if (!data) return { status: 404, error: "Counter pickup not found." };
+        const requestedWh = req.headers["x-warehouse-id"];
+        const allowed: string[] = req.user.allowedWarehouses || [];
+        const isSuper = SUPER_ADMINS.includes((req.user.username || "").toLowerCase());
+        if ((requestedWh && requestedWh !== data.warehouseId) ||
+            (!isSuper && !allowed.includes("*") && !allowed.includes(data.warehouseId))) {
+          return { status: 403, error: "You do not have access to this warehouse." };
+        }
+        if (data.status !== "Finalized" || (data.archiveRevision ?? 0) !== revision) {
+          return { status: 409, error: "The record has changed. Refresh the listing and try again." };
+        }
+        const items = Array.isArray(data.items) && data.items.length ? [...data.items] : null;
+        const item = items ? items[itemIndex] : itemIndex === 0 ? data : null;
+        if (!item) return { status: 404, error: "Counter pickup item not found." };
+
+        const before = {
+          requestType: normalizeCounterPickupRequestType(data.requestType),
+          sourceType: data.sourceType || "",
+          outcome: item.outcome || data.outcome || "",
+          orderNumber: item.orderNumber ?? item.referenceNo ?? data.orderNumber ?? data.referenceNo ?? "",
+          comment: item.comment ?? data.comment ?? ""
+        };
+        const after = {
+          requestType,
+          sourceType: sourceType || before.sourceType,
+          outcome: outcome || before.outcome,
+          orderNumber: orderNumber.trim(),
+          comment: comment.trim()
+        };
+        const metadataChanged = before.requestType !== after.requestType || before.sourceType !== after.sourceType;
+        const itemChanged = before.outcome !== after.outcome || before.orderNumber !== after.orderNumber || before.comment !== after.comment;
+        if (!metadataChanged && !itemChanged) {
+          return { status: 200 };
+        }
+        const itemChanges = {
+          outcome: after.outcome,
+          orderNumber: after.orderNumber,
+          comment: after.comment,
+          archiveEdited: true,
+          destination: Object.hasOwn(destinations, after.outcome) ? destinations[after.outcome] : item.destination || data.destination || null,
+          referenceNo: after.orderNumber,
+          otherNotes: after.comment
+        };
+        const update: Record<string, unknown> = { archiveRevision: revision + 1 };
+        if (metadataChanged) {
+          update.archiveMetadataEdited = true;
+          update.requestType = after.requestType;
+          update.sourceType = after.sourceType || null;
+        }
+        if (items && (metadataChanged || itemChanged)) {
+          if (itemChanged) items[itemIndex] = { ...item, ...itemChanges };
+          update.items = metadataChanged ? items.map(entry => ({ ...entry, requestType: after.requestType, sourceType: after.sourceType || null })) : items;
+        }
+        if (itemChanged && (!items || items.length === 1)) {
+          Object.assign(update, itemChanges);
+        } else if (itemChanged && items) {
+          const outcomes = new Set(items.map((entry, index) => {
+            if (index !== itemIndex && !entry.outcome && data.outcome && data.outcome !== "Mixed") {
+              items[index] = { ...entry, outcome: data.outcome, destination: entry.destination || data.destination || null };
+            }
+            return items[index].outcome || data.outcome || "";
+          }));
+          update.items = metadataChanged ? items.map(entry => ({ ...entry, requestType: after.requestType, sourceType: after.sourceType || null })) : items;
+          update.outcome = outcomes.size === 1 ? outcomes.values().next().value : "Mixed";
+          update.destination = Object.hasOwn(destinations, String(update.outcome)) ? destinations[String(update.outcome)] : "Mixed";
+        }
+
+        const timestamp = nowAucklandIso();
+        const operator = req.user.name || req.user.username;
+        const action = "CP_ARCHIVE_EDIT";
+        const detail = `Item ${itemIndex + 1} (${item.sku || "-"}) updated. ${JSON.stringify(before)} → ${JSON.stringify(after)}`;
+        transaction.update(docRef, update);
+        const revisionLog = { timestamp, operator, action, detail, before, after, itemIndex, sku: item.sku || "", revision: revision + 1 };
+        transaction.create(docRef.collection("archive_edits").doc(), revisionLog);
+        transaction.create(currentDb.collection("logs").doc(), {
+          timestamp, userId: req.user.uid, userName: operator, action, details: detail,
+          orderId: docRef.id, category: "Counter Pickup", before, after, itemIndex
+        });
+        return { status: 200 };
+      });
+      return res.status(result.status).json(result.error ? { success: false, error: result.error } : { success: true });
+    } catch (error) {
+      console.error("Counter pickup archive edit failed:", error);
+      return res.status(500).json({ success: false, error: "Could not save the archive edit." });
     }
   });
 
@@ -4365,15 +4497,17 @@ async function startServer() {
       res.setHeader('Expires', '0');
     };
 
-    app.get('/service-worker.js', (req, res, next) => {
+    app.get(['/sw.js', '/service-worker.js', '/firebase-messaging-sw.js', '/client-build.json'], (req, res, next) => {
       noCacheHeaders(res);
       next();
     });
 
     app.use(express.static(distPath, {
-      setHeaders: (res, path) => {
-        if (path.endsWith('.html')) {
+      setHeaders: (res, filePath) => {
+        if (filePath.endsWith('.html')) {
           noCacheHeaders(res);
+        } else if (filePath.startsWith(path.join(distPath, 'assets') + path.sep) && /-[\w-]{8}\.[^.]+$/.test(path.basename(filePath))) {
+          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
         }
       }
     }));

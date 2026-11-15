@@ -29,11 +29,10 @@ export const PageHeader: React.FC<PageHeaderProps> = ({
 }) => {
   return (
     <header className={cn(
-      "flex-shrink-0 border-b border-slate-200 z-30 transition-all duration-500 ease-in-out group sticky top-0",
+      "flex-shrink-0 border-b border-slate-200 z-30 transition-all duration-500 ease-in-out group sticky top-0 wms-page-header",
       isScrolled 
         ? "shadow-lg backdrop-blur-md bg-white/80" 
         : "shadow-sm bg-white",
-      compact && "cn-page-header",
       className
     )}>
       <div className={cn(
@@ -43,7 +42,7 @@ export const PageHeader: React.FC<PageHeaderProps> = ({
       )}>
         <div className={cn(
           "flex flex-col md:flex-row md:items-center justify-between gap-4 transition-all duration-500",
-          compact ? (children ? "mb-4" : "mb-0") : isScrolled ? "mb-1 group-hover:mb-6" : "mb-6"
+          children && (compact ? "mb-4" : isScrolled ? "mb-1 group-hover:mb-6" : "mb-4")
         )}>
           <div className="flex items-center gap-4">
             {backButton && (
@@ -54,7 +53,8 @@ export const PageHeader: React.FC<PageHeaderProps> = ({
             {Icon && (
               <div className={cn(
                 "w-12 h-12 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center transition-all duration-500",
-                compact ? "cn-header-icon size-8" : isScrolled ? "w-8 h-8 group-hover:w-12 group-hover:h-12" : "w-12 h-12"
+                "wms-header-icon",
+                compact ? "size-8" : isScrolled ? "w-8 h-8 group-hover:w-12 group-hover:h-12" : "w-12 h-12"
               )}>
                 <Icon className={cn(
                   "transition-all duration-500",

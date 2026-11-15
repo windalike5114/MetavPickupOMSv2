@@ -6,6 +6,7 @@ import {
   Calendar,
   ClipboardList,
   Clock,
+  Pencil,
   Loader2,
   Package,
   Plus,
@@ -380,6 +381,82 @@ const getQueueBadgeClass = (status: CounterPickupQueueStatus) => {
   return 'bg-emerald-100 text-emerald-700';
 };
 
+
+type ArchiveEditFields = FinalizeFormState & { requestType: CounterPickupRequestType; sourceType: CounterPickupSourceType | "" };
+
+type ArchiveRevision = {
+  id: string;
+  timestamp: string;
+  operator: string;
+  sku: string;
+  before: ArchiveEditFields;
+  after: ArchiveEditFields;
+};
+
+const archiveSourceOptions = [
+  { value: 'metav', label: 'Metav Order' },
+  { value: 'offline', label: 'Offline Order' },
+  { value: 'blackfern', label: 'BlackFern Order' },
+  { value: 'other', label: 'Other' }
+];
+
+function ArchiveRevisionHistory({ request, token, formatOutcome }: {
+  request: CounterPickup;
+  token: string;
+  formatOutcome: (outcome: string) => string;
+}) {
+  const [logs, setLogs] = useState<ArchiveRevision[] | null>(null);
+  const [error, setError] = useState(false);
+  const [retry, setRetry] = useState(0);
+  useEffect(() => {
+    const controller = new AbortController();
+    setLogs(null);
+    setError(false);
+    const load = async () => {
+      try {
+        const response = await fetch(`/api/counter-pickups/${encodeURIComponent(request.id)}/archive-log`, {
+          headers: { 'x-v2-auth-token': `Bearer ${token}` },
+          cache: 'no-store',
+          signal: controller.signal
+        });
+        const result = await response.json();
+        if (!response.ok || !result.success) throw new Error();
+        if (!controller.signal.aborted) setLogs(result.logs);
+      } catch {
+        if (!controller.signal.aborted) setError(true);
+      }
+    };
+    void load();
+    return () => controller.abort();
+  }, [request.id, request.archiveRevision, token, retry]);
+
+  return (
+    <section className="space-y-2 border-t border-slate-200 pt-3">
+      <h3 className="text-sm font-semibold">Revision history</h3>
+      {error && <button type="button" className="text-sm font-semibold text-blue-700" onClick={() => setRetry(value => value + 1)}>Retry loading revisions</button>}
+      {!error && !logs && <p role="status" className="text-sm">Loading revisions…</p>}
+      {logs?.length === 0 && <p className="text-sm">No revisions found.</p>}
+      {logs?.map(log => (
+        <div key={log.id} className="space-y-1 rounded-md border border-slate-200 p-2 text-sm">
+          <p className="font-semibold">{log.sku} · {log.operator} · {formatDate(log.timestamp, 'yyyy-MM-dd HH:mm')}</p>
+          {(['requestType', 'sourceType', 'outcome', 'orderNumber', 'comment'] as const).filter(field => log.before[field] !== log.after[field]).map(field => {
+            const formatValue = (value: string) => {
+              if (field === 'outcome') return formatOutcome(value);
+              if (field === 'requestType') return value === 'scheduledDelivery' ? 'Scheduled Delivery' : 'Counter Pickup';
+              if (field === 'sourceType') return archiveSourceOptions.find(option => option.value === value)?.label || value || '—';
+              return value || '—';
+            };
+            const from = formatValue(log.before[field]);
+            const to = formatValue(log.after[field]);
+            const label = { requestType: 'Request Type', sourceType: 'Order Source', outcome: 'Destination', orderNumber: 'Order Number', comment: 'Comment' }[field];
+            return <p key={field} className="whitespace-pre-wrap break-words"><strong>{label}</strong> {from} → {to}</p>;
+          })}
+        </div>
+      ))}
+    </section>
+  );
+}
+
 export const CounterPickupListing: React.FC = () => {
   const { token, activeWarehouse, profile } = useAuth();
   const location = useLocation();
@@ -425,6 +502,8 @@ export const CounterPickupListing: React.FC = () => {
   const [sourceType, setSourceType] = useState<CounterPickupSourceType | ''>('');
   const suppressSkuSearchRef = useRef(false);
 
+  const [archiveEdit, setArchiveEdit] = useState<{ request: CounterPickup; item: CounterPickupItem; itemIndex: number; draft: ArchiveEditFields } | null>(null);
+  const [archiveEditError, setArchiveEditError] = useState("");
   const [finalizeTarget, setFinalizeTarget] = useState<CounterPickup | null>(null);
   const [finalizeForm, setFinalizeForm] = useState<FinalizeFormState>(emptyFinalizeForm);
   const [finalizeMeta, setFinalizeMeta] = useState<FinalizeMetaState>({ requestType: 'counterPickup', sourceType: 'metav' });
@@ -772,6 +851,33 @@ export const CounterPickupListing: React.FC = () => {
     }
   };
 
+  const saveArchiveEdit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!token || !archiveEdit || submitting) return;
+    const { request, itemIndex, draft } = archiveEdit;
+    setSubmitting(true);
+    setArchiveEditError('');
+    try {
+      const response = await fetch(`/api/counter-pickups/${encodeURIComponent(request.id)}/archive`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-v2-auth-token': `Bearer ${token}`,
+          'x-warehouse-id': activeWarehouse || ''
+        },
+        body: JSON.stringify({ ...draft, itemIndex, revision: request.archiveRevision ?? 0 })
+      });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.error || 'Could not save the archive edit.');
+      setArchiveEdit(null);
+      await loadRequests('history');
+    } catch (error) {
+      setArchiveEditError(error instanceof Error ? error.message : 'Could not save the archive edit.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   const handleFinalize = async () => {
     if (!token || !finalizeTarget) return;
     const targetItems = finalizeTarget.items?.length ? finalizeTarget.items : [{
@@ -961,6 +1067,7 @@ export const CounterPickupListing: React.FC = () => {
           qty: item.qty,
           productName: item.productName,
           location: item.location,
+          archiveEdited: Boolean(request.archiveMetadataEdited || item.archiveEdited || (!request.items?.length && request.archiveRevision)),
           outcome: item.outcome,
           destination: item.destination,
           finalizedAt: item.finalizedAt || ('completedAt' in item ? item.completedAt : null),
@@ -1036,7 +1143,7 @@ export const CounterPickupListing: React.FC = () => {
     return outcome;
   };
   const referenceLabelForHistory = (item: CounterPickupItem, request: CounterPickup) => {
-    return item.orderNumber || item.referenceNo || request.orderNumber || request.referenceNo || '-';
+    return (item.orderNumber ?? item.referenceNo ?? request.orderNumber ?? request.referenceNo) || '-';
   };
   const destinationLabelForHistory = (item: CounterPickupItem, request: CounterPickup) => {
     const raw = item.outcome || request.outcome;
@@ -1047,7 +1154,7 @@ export const CounterPickupListing: React.FC = () => {
     if (raw === 'other') return text.other;
     return raw;
   };
-  const historyCommentLabel = (item: CounterPickupItem, request: CounterPickup) => item.comment || request.comment || '-';
+  const historyCommentLabel = (item: CounterPickupItem, request: CounterPickup) => (item.comment ?? request.comment) || '-';
   const historyStatusLabel = (request: CounterPickup) => statusLabel(request.status);
   const historyQueueLabel = (request: CounterPickup) => queueLabel(request.queueStatus);
   const historyTableTextClass = 'block min-h-[1.25rem] leading-5 whitespace-pre-wrap break-words';
@@ -1101,7 +1208,7 @@ export const CounterPickupListing: React.FC = () => {
       return;
     } finally { setExporting(false); }
     const detailRows: string[][] = [
-      ['SKU', 'Qty', 'Requested By', 'Order Source', 'Request No.', 'Order Number', 'Destination', 'Comment', 'Request Type', 'Created At']
+      ['SKU', 'Qty', 'Requested By', 'Order Source', 'Request No.', 'Order Number', 'Destination', 'Comment', 'Request Type', 'Created At', 'Revised']
     ];
     const summaryMap = new Map<string, number>();
 
@@ -1111,7 +1218,7 @@ export const CounterPickupListing: React.FC = () => {
 
       const sku = item.sku || '';
       const qty = Number(item.qty || 0);
-      const orderNumber = item.orderNumber || item.referenceNo || request.orderNumber || request.referenceNo || '';
+      const orderNumber = item.orderNumber ?? item.referenceNo ?? request.orderNumber ?? request.referenceNo ?? '';
 
       detailRows.push([
         sku,
@@ -1163,7 +1270,7 @@ export const CounterPickupListing: React.FC = () => {
       return;
     } finally { setExporting(false); }
     const detailRows: string[][] = [
-      ['SKU', 'Qty', 'Requested By', 'Order Source', 'Request No.', 'Order Number', 'Destination', 'Comment', 'Request Type', 'Finalized At']
+      ['SKU', 'Qty', 'Requested By', 'Order Source', 'Request No.', 'Order Number', 'Destination', 'Comment', 'Request Type', 'Finalized At', 'Revised']
     ];
     const summaryMap = new Map<string, number>();
     const allowedSourceTypes = new Set(['metav', 'offline', 'blackfern', 'other']);
@@ -1182,7 +1289,7 @@ export const CounterPickupListing: React.FC = () => {
 
       const sku = item.sku || '';
       const qty = Number(item.qty || 0);
-      const orderNumber = item.orderNumber || item.referenceNo || request.orderNumber || request.referenceNo || '';
+      const orderNumber = item.orderNumber ?? item.referenceNo ?? request.orderNumber ?? request.referenceNo ?? '';
       const sourceLabel = request.sourceType === 'offline'
         ? 'Offline Order'
         : request.sourceType === 'blackfern'
@@ -1789,6 +1896,30 @@ export const CounterPickupListing: React.FC = () => {
                           </td>
                           <td className="px-3 py-3 align-top">
                             <div className="flex justify-end gap-1.5 flex-wrap">
+                              {canCreate && item.status === 'Finalized' && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const outcome = entry.outcome || item.outcome;
+                                    setArchiveEditError('');
+                                    setArchiveEdit({
+                                      request: item, item: entry, itemIndex,
+                                      draft: {
+                                        requestType: item.requestType || "counterPickup",
+                                        sourceType: item.sourceType || "",
+                                        outcome: outcomeOptions(item).some(option => option.value === outcome) ? outcome as CounterPickupOutcome : '',
+                                        orderNumber: entry.orderNumber ?? entry.referenceNo ?? item.orderNumber ?? item.referenceNo ?? '',
+                                        comment: entry.comment ?? item.comment ?? ''
+                                      }
+                                    });
+                                  }}
+                                  className="inline-flex items-center gap-1 rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs font-semibold text-slate-700 hover:bg-blue-50"
+                                  aria-label={`Edit archived item ${entry.sku}`}
+                                >
+                                  <Pencil className="size-3" aria-hidden="true" />
+                                  Edit
+                                </button>
+                              )}
                               {canCreate && item.status === 'Picked' && itemIndex === 0 && (
                                   <button
                                   onClick={() => {
@@ -1839,6 +1970,9 @@ export const CounterPickupListing: React.FC = () => {
                                       {item.pickupNote || item.comment}
                                     </div>
                                   </div>
+                                )}
+                                {!isCnRoute && token && !!item.archiveRevision && (
+                                  <ArchiveRevisionHistory request={item} token={token} formatOutcome={outcomeLabel} />
                                 )}
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-2 max-h-72 overflow-y-auto pr-1">
                                   {(item.items || [{ sku: item.sku, productName: item.productName, location: item.location, qty: item.qty }]).map((detailEntry, idx) => (
@@ -2009,6 +2143,58 @@ export const CounterPickupListing: React.FC = () => {
           )}
         </div>
       </div>
+
+      {archiveEdit && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+          <form onSubmit={saveArchiveEdit} role="dialog" aria-modal="true" aria-labelledby="archive-edit-title" className="max-h-[90dvh] w-full max-w-md space-y-4 overflow-y-auto rounded-xl border bg-white p-5 shadow-xl">
+            <div>
+              <h2 id="archive-edit-title" className="text-lg font-bold">Edit archived item</h2>
+              <p className="text-sm text-slate-600">{archiveEdit.request.id} · {archiveEdit.item.sku}</p>
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <label className="block space-y-1 text-sm font-semibold">
+                <span>Request Type</span>
+                <select autoFocus className="w-full rounded-md border px-3 py-2" value={archiveEdit.draft.requestType}
+                  onChange={event => setArchiveEdit({ ...archiveEdit, draft: { ...archiveEdit.draft, requestType: event.target.value as CounterPickupRequestType } })}>
+                  <option value="counterPickup">Counter Pickup</option>
+                  <option value="scheduledDelivery">Scheduled Delivery</option>
+                </select>
+              </label>
+              <label className="block space-y-1 text-sm font-semibold">
+                <span>Order Source</span>
+                <select className="w-full rounded-md border px-3 py-2" value={archiveEdit.draft.sourceType}
+                  onChange={event => setArchiveEdit({ ...archiveEdit, draft: { ...archiveEdit.draft, sourceType: event.target.value as ArchiveEditFields['sourceType'] } })}>
+                  {archiveEdit.draft.sourceType === '' && <option value="">Unspecified</option>}
+                  {archiveSourceOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select>
+              </label>
+            </div>
+            <label className="block space-y-1 text-sm font-semibold">
+              <span>Destination</span>
+              <select className="w-full rounded-md border px-3 py-2" value={archiveEdit.draft.outcome}
+                onChange={event => setArchiveEdit({ ...archiveEdit, draft: { ...archiveEdit.draft, outcome: event.target.value as FinalizeFormState['outcome'] } })}>
+                {archiveEdit.draft.outcome === '' && <option value="">Unspecified</option>}
+                {outcomeOptions({ ...archiveEdit.request, requestType: archiveEdit.draft.requestType }).map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+            </label>
+            <label className="block space-y-1 text-sm font-semibold">
+              <span>Order Number</span>
+              <input className="w-full rounded-md border px-3 py-2" maxLength={100} value={archiveEdit.draft.orderNumber}
+                onChange={event => setArchiveEdit({ ...archiveEdit, draft: { ...archiveEdit.draft, orderNumber: event.target.value } })} />
+            </label>
+            <label className="block space-y-1 text-sm font-semibold">
+              <span>Comment</span>
+              <textarea className="w-full rounded-md border px-3 py-2" rows={3} maxLength={1000} value={archiveEdit.draft.comment}
+                onChange={event => setArchiveEdit({ ...archiveEdit, draft: { ...archiveEdit.draft, comment: event.target.value } })} />
+            </label>
+            {archiveEditError && <p role="alert" className="text-sm text-red-700">{archiveEditError}</p>}
+            <div className="flex justify-end gap-2">
+              <button type="button" disabled={submitting} onClick={() => setArchiveEdit(null)} className="rounded-md border px-3 py-2 text-sm font-semibold">Cancel</button>
+              <button type="submit" disabled={submitting} className="rounded-md bg-blue-700 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50">Save changes</button>
+            </div>
+          </form>
+        </div>
+      )}
 
       {finalizeTarget && (
         <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4">

@@ -72,16 +72,15 @@ export const Login = ({ cnPortal = false }: { cnPortal?: boolean }) => {
   }
 
   return (
-    <div className={`min-h-screen bg-slate-50 flex items-center justify-center p-4 ${cnPortal ? "cn-login" : ""}`}>
-      <div className={`max-w-md w-full bg-white rounded-2xl shadow-md p-8 border border-slate-200 ${cnPortal ? "cn-login-card" : ""}`}>
+    <div className="wms-login flex min-h-dvh items-center justify-center p-4">
+      <div className="wms-login-card w-full max-w-md border bg-white p-8">
         <div className="text-center mb-8">
           <div 
-            className="inline-flex items-center justify-center w-16 h-16 bg-indigo-100 rounded-2xl mb-4 select-none active:scale-95 transition-transform"
+            className="inline-flex items-center justify-center wms-brand-mark size-12 mb-4 select-none active:scale-95 transition-transform"
           >
-            <Package className="w-8 h-8 text-indigo-600" />
+            <Package className="size-6" />
           </div>
           <h1 className="text-2xl font-bold text-slate-900">{cnPortal ? 'WMS 中国门户' : 'Pickup System'}</h1>
-          {!cnPortal && <p className="mt-2 text-slate-500">Internal Order Management</p>}
         </div>
 
 

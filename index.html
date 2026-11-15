@@ -2,6 +2,27 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <meta name="wms-build-id" content="WMS_BUILD_ID_PENDING" />
+    <script>
+      window.addEventListener('error', function (event) {
+        const script = event.target;
+        if (!(script instanceof HTMLScriptElement) || script.type !== 'module' || !script.src.startsWith(location.origin + '/assets/')) return;
+        const root = document.getElementById('root');
+        if (!root || root.firstChild) return;
+        const isCn = location.hostname.startsWith('cn.') || location.pathname.startsWith('/cn');
+        const message = document.createElement('p');
+        message.textContent = isCn ? '页面资源加载失败，请重新加载。' : 'Page files failed to load. Reload to try again.';
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = isCn ? '重新加载' : 'Reload page';
+        button.addEventListener('click', function () { location.reload(); });
+        const box = document.createElement('main');
+        box.style.cssText = 'max-width:28rem;margin:12vh auto;padding:1.5rem;color:#14233a;font:16px system-ui';
+        button.style.cssText = 'padding:.65rem 1rem;border:0;border-radius:6px;background:#1d4ed8;color:white;font:inherit;cursor:pointer';
+        box.append(message, button);
+        root.append(box);
+      }, true);
+    </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <meta http-equiv="Content-Security-Policy" content="script-src 'self' 'unsafe-inline' 'unsafe-eval' https://acapickup.com https://static.cloudflareinsights.com https://cdn.jsdelivr.net;" />
     <title>Warehouse Management System (WMS)</title>

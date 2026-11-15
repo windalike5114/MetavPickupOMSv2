@@ -44,16 +44,16 @@ export const CnPortalLayout: React.FC<{ children: React.ReactNode }> = ({ childr
     : location.pathname === path || location.pathname.startsWith(`${path}/`);
 
   return (
-    <div className="cn-portal-shell flex h-dvh w-full flex-col overflow-hidden">
-      <header className="cn-masthead relative z-40 flex h-14 shrink-0 items-center justify-between px-4 md:px-6">
+    <div className="cn-portal-shell wms-theme flex h-dvh w-full flex-col overflow-hidden">
+      <header className="wms-masthead relative z-40 flex h-14 shrink-0 items-center justify-between px-4 md:px-6">
         <Link to="/cn" className="flex min-w-0 items-center gap-2.5">
-          <span className="cn-brand-mark grid size-8 shrink-0 place-items-center">
+          <span className="wms-brand-mark grid size-8 shrink-0 place-items-center">
             <Warehouse className="h-5 w-5" />
           </span>
           <span className="min-w-0">
             <span className="flex items-center gap-2">
               <span className="truncate text-sm font-semibold tracking-tight">WMS 中国门户</span>
-              <span className="cn-version hidden text-[11px] tabular-nums sm:inline">v{APP_VERSION}</span>
+              <span className="wms-version hidden text-[11px] tabular-nums sm:inline">v{APP_VERSION}</span>
             </span>
           </span>
         </Link>
@@ -83,7 +83,7 @@ export const CnPortalLayout: React.FC<{ children: React.ReactNode }> = ({ childr
               key={item.path}
               to={item.path}
               aria-current={active ? 'page' : undefined}
-              className="cn-nav-link inline-flex shrink-0 items-center gap-1.5 py-3 text-xs font-medium"
+              className="wms-nav-link inline-flex shrink-0 items-center gap-1.5 py-3 text-xs font-medium"
             >
               <item.icon className="h-4 w-4" />
               {item.name}
@@ -93,7 +93,7 @@ export const CnPortalLayout: React.FC<{ children: React.ReactNode }> = ({ childr
       </nav>
 
       <div className="flex min-h-0 flex-1 w-full overflow-hidden">
-        <aside className="cn-sidebar hidden w-44 shrink-0 flex-col md:flex lg:w-48">
+        <aside className="wms-sidebar hidden w-44 shrink-0 flex-col md:flex lg:w-48">
           <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-4" aria-label="中国门户导航">
             {visibleNavItems.map((item) => {
               const active = isNavActive(item.path);
@@ -102,7 +102,7 @@ export const CnPortalLayout: React.FC<{ children: React.ReactNode }> = ({ childr
                   key={item.path}
                   to={item.path}
                   aria-current={active ? 'page' : undefined}
-                  className="cn-nav-link flex items-center gap-3 px-3 py-2.5"
+                  className="wms-nav-link flex items-center gap-3 px-3 py-2.5"
                 >
                   <item.icon className="size-4 shrink-0" aria-hidden="true" />
                   <span className="text-sm font-semibold">{item.name}</span>
@@ -113,7 +113,7 @@ export const CnPortalLayout: React.FC<{ children: React.ReactNode }> = ({ childr
 
         </aside>
 
-        <main className="cn-workspace flex min-w-0 flex-1 flex-col overflow-hidden">
+        <main className="wms-workspace flex min-w-0 flex-1 flex-col overflow-hidden">
           {children}
         </main>
       </div>
