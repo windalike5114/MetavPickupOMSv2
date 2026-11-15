@@ -1093,6 +1093,7 @@ export const OrderDetail: React.FC = () => {
   return (
     <div className="flex flex-col h-full w-full bg-slate-50 overflow-hidden">
       <PageHeader
+        compact={isCnApiMode}
         title={order.bookingNumber}
         subtitle={
           <div className="flex items-center gap-3">

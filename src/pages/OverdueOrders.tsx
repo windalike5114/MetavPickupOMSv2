@@ -355,8 +355,9 @@ export const OverdueOrders = () => {
     <div className="flex-1 flex flex-row min-w-0 bg-slate-50 overflow-hidden relative">
       <div className="flex-1 flex flex-col min-w-0">
         <PageHeader
+          compact={isCnRoute}
           title={isCnRoute ? "超期订单审核" : "Overdue Audit"}
-          subtitle={isCnRoute ? "超期订单管理" : "Aging Order Management"}
+          subtitle={isCnRoute ? undefined : "Aging Order Management"}
           icon={Clock}
           isScrolled={isScrolled}
           actions={
@@ -494,7 +495,7 @@ export const OverdueOrders = () => {
                 <CheckCircle2 className="w-10 h-10" />
               </div>
               <h3 className="text-xl font-black text-slate-900">{isCnRoute ? '当前无超期订单' : 'Queue Cleared'}</h3>
-              <p className="text-slate-500 mt-2">{isCnRoute ? '没有订单匹配当前超期筛选条件。' : 'No orders match the current overdue criteria.'}</p>
+              {!isCnRoute && <p className="mt-2 text-slate-500">No orders match the current overdue criteria.</p>}
             </div>
           ) : (
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">

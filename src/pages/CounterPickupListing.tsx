@@ -21,6 +21,7 @@ import { cn, formatDate, getAucklandDateKey, getAucklandBusinessDayWindow, hasPe
 import * as XLSX from 'xlsx';
 
 type ListingView = 'active' | 'history';
+type PagedPickup = CounterPickup & { matchedItemIndexes?: number[] };
 type CounterListTab = 'All' | 'My Pending' | 'My Created';
 type StatusFilter = 'All' | CounterPickupStatus;
 type QueueFilter = 'All' | CounterPickupQueueStatus;
@@ -99,6 +100,7 @@ type CounterPickupItem = {
   referenceNo?: string | null;
   comment?: string | null;
   finalizedAt?: string | null;
+  completedAt?: string | null;
 };
 
 type CounterPickupItemDraft = {
@@ -199,8 +201,7 @@ const isAucklandDateOnOrAfter = (value: string, compare: string) => {
 };
 
 const CN_TEXT = {
-  pageTitle: '申请提货列表',
-  pageSubtitle: '前台临时提货、仓库送达与后续结案处理。',
+  pageTitle: '线下出库记录',
   active: '待处理',
   history: '历史记录',
   all: '全部',
@@ -385,7 +386,15 @@ export const CounterPickupListing: React.FC = () => {
   const isCnRoute = location.pathname.startsWith('/cn');
   const text = isCnRoute ? CN_TEXT : EN_TEXT;
 
-  const [view, setView] = useState<ListingView>('active');
+  const drilldown = new URLSearchParams(location.search);
+  const outboundDate = isCnRoute ? drilldown.get('outboundDate') || '' : '';
+  const requestedWarehouse = isCnRoute ? drilldown.get('warehouse') || '' : '';
+  const [warehouseFilter, setWarehouseFilter] = useState(requestedWarehouse);
+  const [view, setView] = useState<ListingView>(outboundDate ? 'history' : 'active');
+  const [historyRefresh, setHistoryRefresh] = useState(0);
+  const [historyCursors, setHistoryCursors] = useState<{ key: string; entries: string[] }>({ key: '', entries: [''] });
+  const [historyResult, setHistoryResult] = useState<{ key: string; rows: PagedPickup[]; nextCursor: string | null; error?: string } | null>(null);
+  const [exporting, setExporting] = useState(false);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [requests, setRequests] = useState<CounterPickup[]>([]);
@@ -393,7 +402,7 @@ export const CounterPickupListing: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('All');
   const [queueFilter, setQueueFilter] = useState<QueueFilter>('All');
   const [counterTab, setCounterTab] = useState<CounterListTab>('All');
-  const [dateRange, setDateRange] = useState({ start: '', end: '' });
+  const [dateRange, setDateRange] = useState({ start: outboundDate, end: outboundDate });
   const [historySourceFilters, setHistorySourceFilters] = useState<HistorySourceFilter>({
     metav: false,
     offline: false,
@@ -407,7 +416,7 @@ export const CounterPickupListing: React.FC = () => {
   const [historyTodayOnly, setHistoryTodayOnly] = useState(false);
   const [dailyExportDate, setDailyExportDate] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
-  const [showCreateForm, setShowCreateForm] = useState(true);
+  const [showCreateForm, setShowCreateForm] = useState(!isCnRoute);
   const [expandedHistoryIds, setExpandedHistoryIds] = useState<string[]>([]);
   const [draft, setDraft] = useState<CounterPickupItemDraft>(createEmptyDraft);
   const [itemsDraft, setItemsDraft] = useState<CounterPickupItem[]>([]);
@@ -451,6 +460,84 @@ export const CounterPickupListing: React.FC = () => {
     setCurrentPage(1);
   }, [searchTerm, statusFilter, queueFilter, dateRange.start, dateRange.end, view, counterTab, historySourceFilters, historyRequestTypeFilters, historyTodayOnly]);
 
+  const pagedHistory = isCnRoute && view === 'history';
+  const historyParams = new URLSearchParams({ view: 'history', paged: '1' });
+  if (warehouseFilter) historyParams.set('warehouse', warehouseFilter);
+  const today = getAucklandDateKey(new Date());
+  const from = historyTodayOnly && (!dateRange.start || today > dateRange.start) ? today : dateRange.start;
+  const till = historyTodayOnly && (!dateRange.end || today < dateRange.end) ? today : dateRange.end;
+  if (from) historyParams.set('start', from);
+  if (till) historyParams.set('end', till);
+  if (outboundDate) historyParams.set('outbound', '1');
+  if (searchTerm.trim()) historyParams.set('search', searchTerm.trim());
+  if (statusFilter !== 'All') historyParams.set('status', statusFilter);
+  if (queueFilter !== 'All') historyParams.set('queue', queueFilter);
+  if (counterTab === 'My Created') historyParams.set('mine', '1');
+  if (counterTab === 'My Pending') historyParams.set('pending', '1');
+  const sourceFilters = Object.entries(historySourceFilters).filter(([, value]) => value).map(([key]) => key);
+  const typeFilters = Object.entries(historyRequestTypeFilters).filter(([, value]) => value).map(([key]) => key);
+  if (sourceFilters.length) historyParams.set('sources', sourceFilters.join(','));
+  if (typeFilters.length) historyParams.set('types', typeFilters.join(','));
+  const historyQuery = historyParams.toString();
+  const cursors = historyCursors.key === historyQuery ? historyCursors.entries : [''];
+  const currentCursor = cursors[cursors.length - 1];
+  const pageKey = JSON.stringify([token, historyQuery, currentCursor, historyRefresh]);
+
+  useEffect(() => {
+    if (!outboundDate) return;
+    setView('history');
+    setWarehouseFilter(requestedWarehouse);
+    setDateRange({ start: outboundDate, end: outboundDate });
+  }, [outboundDate, requestedWarehouse]);
+
+  const fetchHistory = async (query: URLSearchParams, cursor: string, limit: number, signal?: AbortSignal) => {
+    const params = new URLSearchParams(query);
+    params.set('limit', String(limit));
+    if (cursor) params.set('after', cursor);
+    const response = await fetch('/api/counter-pickups/list?' + params, {
+      headers: { 'x-v2-auth-token': `Bearer ${token}` }, signal
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.error || text.loadError);
+    return { rows: (data.requests || []) as PagedPickup[], nextCursor: (data.nextCursor || null) as string | null };
+  };
+
+  useEffect(() => {
+    if (!token || !pagedHistory) return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      if (from && till && from > till) {
+        setHistoryResult({ key: pageKey, rows: [], nextCursor: null });
+        return;
+      }
+      void fetchHistory(new URLSearchParams(historyQuery), currentCursor, PAGE_SIZE, controller.signal).then(result => {
+        if (!controller.signal.aborted) setHistoryResult({ key: pageKey, ...result });
+      }).catch(() => {
+        if (!controller.signal.aborted) setHistoryResult({ key: pageKey, rows: [], nextCursor: null, error: text.loadError });
+      });
+    }, 200);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [pageKey, token, pagedHistory, historyQuery, currentCursor, from, till, text.loadError]);
+
+  const currentHistory = historyResult?.key === pageKey ? historyResult : null;
+  const listLoading = pagedHistory ? !currentHistory : loading;
+  const nextHistoryCursor = currentHistory?.nextCursor;
+  const loadExportHistory = async (businessDate?: string) => {
+    const params = businessDate
+      ? new URLSearchParams({ view: 'history', paged: '1', businessDate })
+      : new URLSearchParams(historyQuery);
+    if (businessDate && warehouseFilter) params.set('warehouse', warehouseFilter);
+    const rows: PagedPickup[] = [];
+    let after = '';
+    do {
+      const page = await fetchHistory(params, after, 250);
+      rows.push(...page.rows);
+      if (page.nextCursor && page.nextCursor === after) throw new Error('Invalid history cursor');
+      after = page.nextCursor ?? '';
+    } while (after);
+    return buildHistoryRows(rows);
+  };
+
   const resetCreateForm = () => {
     setDraft(createEmptyDraft());
     setItemsDraft([]);
@@ -460,6 +547,7 @@ export const CounterPickupListing: React.FC = () => {
   };
   const loadRequests = async (nextView = view) => {
     if (!token) return;
+    if (isCnRoute && nextView === 'history') { setHistoryRefresh(previous => previous + 1); return; }
     setLoading(true);
     try {
       const response = await fetch(`/api/counter-pickups/list?view=${nextView}&limit=500`, {
@@ -479,8 +567,8 @@ export const CounterPickupListing: React.FC = () => {
   };
 
   useEffect(() => {
-    loadRequests(view);
-  }, [token, activeWarehouse, view]);
+    if (!pagedHistory) void loadRequests(view);
+  }, [token, activeWarehouse, view, pagedHistory]);
 
   useEffect(() => {
     if (suppressSkuSearchRef.current) {
@@ -830,6 +918,7 @@ export const CounterPickupListing: React.FC = () => {
   };
 
   const filteredRequests = useMemo(() => {
+    if (pagedHistory) return currentHistory?.rows || [];
     const hasSourceFilter = Object.values(historySourceFilters).some(Boolean);
     const hasRequestTypeFilter = Object.values(historyRequestTypeFilters).some(Boolean);
     const todayKey = getAucklandDateKey(new Date());
@@ -850,21 +939,21 @@ export const CounterPickupListing: React.FC = () => {
       const matchesToday = !historyTodayOnly || itemDate === todayKey;
       const matchesSource = !hasSourceFilter || !!item.sourceType && historySourceFilters[(item.sourceType as CounterPickupSourceType) || 'other'];
       const matchesRequestType = !hasRequestTypeFilter || !!item.requestType && historyRequestTypeFilters[(item.requestType as CounterPickupRequestType) || 'counterPickup'];
-      return matchesSearch && matchesStatus && matchesQueue && matchesDate && matchesMyPending && matchesMyCreated && matchesToday && matchesSource && matchesRequestType;
+      return (!isCnRoute || !warehouseFilter || item.warehouseId === warehouseFilter) && matchesSearch && matchesStatus && matchesQueue && matchesDate && matchesMyPending && matchesMyCreated && matchesToday && matchesSource && matchesRequestType;
     });
-  }, [requests, searchTerm, statusFilter, queueFilter, dateRange.start, dateRange.end, counterTab, profile?.uid, historySourceFilters, historyRequestTypeFilters, historyTodayOnly]);
+  }, [requests, searchTerm, statusFilter, queueFilter, dateRange.start, dateRange.end, counterTab, profile?.uid, historySourceFilters, historyRequestTypeFilters, historyTodayOnly, pagedHistory, currentHistory, isCnRoute, warehouseFilter]);
 
   const totalPages = Math.max(1, Math.ceil(filteredRequests.length / PAGE_SIZE));
   const paginatedRequests = useMemo(() => {
     const start = (currentPage - 1) * PAGE_SIZE;
     return filteredRequests.slice(start, start + PAGE_SIZE);
   }, [filteredRequests, currentPage]);
-  const historyRows = useMemo<CounterPickupRow[]>(() => {
-    return filteredRequests.flatMap((request) => {
+  const buildHistoryRows = (rows: PagedPickup[]): CounterPickupRow[] => {
+    return rows.flatMap((request) => {
       const requestItems = request.items?.length
         ? request.items
         : [{ sku: request.sku, productName: request.productName, location: request.location, qty: request.qty }];
-      return requestItems.map((item, itemIndex) => ({
+      return requestItems.flatMap((item, itemIndex) => request.matchedItemIndexes && !request.matchedItemIndexes.includes(itemIndex) ? [] : [{
         request,
         item: {
           sku: item.sku,
@@ -873,20 +962,21 @@ export const CounterPickupListing: React.FC = () => {
           location: item.location,
           outcome: item.outcome,
           destination: item.destination,
-          finalizedAt: item.finalizedAt,
+          finalizedAt: item.finalizedAt || ('completedAt' in item ? item.completedAt : null),
           orderNumber: item.orderNumber,
           referenceNo: item.referenceNo,
           comment: item.comment,
           otherNotes: item.otherNotes,
         },
         itemIndex,
-      }));
+      }]);
     });
-  }, [filteredRequests]);
+  };
+  const historyRows = useMemo(() => buildHistoryRows(filteredRequests), [filteredRequests]);
   const paginatedHistoryRows = useMemo(() => {
     const start = (currentPage - 1) * PAGE_SIZE;
-    return historyRows.slice(start, start + PAGE_SIZE);
-  }, [historyRows, currentPage]);
+    return pagedHistory ? historyRows : historyRows.slice(start, start + PAGE_SIZE);
+  }, [historyRows, currentPage, pagedHistory]);
   const displayTotalPages = view === 'history' ? Math.max(1, Math.ceil(historyRows.length / PAGE_SIZE)) : totalPages;
 
   useEffect(() => {
@@ -1000,13 +1090,21 @@ export const CounterPickupListing: React.FC = () => {
       })
     };
   };
-  const handleExportFilteredList = () => {
+  const handleExportFilteredList = async () => {
+    setExporting(true);
+    let exportRows: CounterPickupRow[];
+    try {
+      exportRows = pagedHistory ? await loadExportHistory() : historyRows;
+    } catch {
+      alert(isCnRoute ? '导出失败，请重试' : 'Export failed. Please try again.');
+      return;
+    } finally { setExporting(false); }
     const detailRows: string[][] = [
       ['SKU', 'Qty', 'Requested By', 'Order Source', 'Request No.', 'Order Number', 'Destination', 'Comment', 'Request Type', 'Created At']
     ];
     const summaryMap = new Map<string, number>();
 
-    historyRows.forEach(({ request, item }) => {
+    exportRows.forEach(({ request, item }) => {
       const outcome = String(item.outcome || request.outcome || '').trim();
       if (outcome === 'returnedToWarehouse') return;
 
@@ -1054,7 +1152,15 @@ export const CounterPickupListing: React.FC = () => {
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
   };
-  const handleExportDailyPickupHistory = () => {
+  const handleExportDailyPickupHistory = async () => {
+    setExporting(true);
+    let exportRows: CounterPickupRow[];
+    try {
+      exportRows = isCnRoute ? await loadExportHistory(dailyExportDate || today) : historyRows;
+    } catch {
+      alert(isCnRoute ? '导出失败，请重试' : 'Export failed. Please try again.');
+      return;
+    } finally { setExporting(false); }
     const detailRows: string[][] = [
       ['SKU', 'Qty', 'Requested By', 'Order Source', 'Request No.', 'Order Number', 'Destination', 'Comment', 'Request Type', 'Finalized At']
     ];
@@ -1063,11 +1169,11 @@ export const CounterPickupListing: React.FC = () => {
     const targetDate = dailyExportDate ? `${dailyExportDate}T12:00:00` : new Date();
     const { start, end } = getAucklandBusinessDayWindow(targetDate, 15);
 
-    historyRows.forEach(({ request, item }) => {
-      const finalizedAt = request.finalizedAt || request.updatedAt || request.createdAt;
+    exportRows.forEach(({ request, item }) => {
+      const finalizedAt = isCnRoute ? item.finalizedAt || request.finalizedAt || request.completedAt : request.finalizedAt || request.updatedAt || request.createdAt;
       const finalizedDate = finalizedAt ? new Date(finalizedAt) : null;
-      if (!finalizedDate || finalizedDate < start || finalizedDate >= end) return;
-      if (!allowedSourceTypes.has(String(request.sourceType || '').toLowerCase())) return;
+      if (!finalizedDate || (!isCnRoute && (finalizedDate < start || finalizedDate >= end))) return;
+      if (!isCnRoute && !allowedSourceTypes.has(String(request.sourceType || '').toLowerCase())) return;
       const requestType = String(request.requestType || '').trim();
       if (requestType !== 'counterPickup' && requestType !== 'scheduledDelivery') return;
       const destination = String(item.destination || request.destination || item.outcome || request.outcome || '').trim();
@@ -1125,10 +1231,11 @@ export const CounterPickupListing: React.FC = () => {
     URL.revokeObjectURL(url);
   };
   return (
-    <div className="flex-1 flex flex-col min-w-0 bg-slate-50 overflow-hidden">
+    <div className={cn("flex-1 flex flex-col min-w-0 bg-slate-50 overflow-hidden", isCnRoute && "cn-counter-page")}>
       <PageHeader
+        compact={isCnRoute}
         title={text.pageTitle}
-        subtitle={text.pageSubtitle}
+        subtitle={isCnRoute ? undefined : EN_TEXT.pageSubtitle}
         icon={ClipboardList}
         isScrolled={isScrolled}
         actions={
@@ -1144,7 +1251,7 @@ export const CounterPickupListing: React.FC = () => {
         }
       />
 
-      <div className="flex-1 overflow-y-auto p-4 md:p-8">
+      <div className={cn("flex-1 overflow-y-auto p-4 md:p-8", isCnRoute && "cn-work-area")}>
         <div ref={sentinelRef} className="h-px w-full pointer-events-none -mt-8" />
         <div className="w-full mx-auto space-y-6">
           {!canViewPage ? (
@@ -1156,20 +1263,20 @@ export const CounterPickupListing: React.FC = () => {
             <section className="bg-white p-4 md:p-6 rounded-2xl border border-slate-100 shadow-sm space-y-5">
               <div>
                 <h2 className="text-lg font-bold text-slate-900">{text.createRequest}</h2>
-                <p className="text-sm text-slate-500 mt-1">{text.createHint}</p>
+                {!isCnRoute && <p className="mt-1 text-sm text-slate-500">{text.createHint}</p>}
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
                 <div className="lg:col-span-3">
                   <label className="block text-sm font-bold text-slate-900 mb-2">
-                    {text.requestType} <span className="ml-1 inline-flex px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] uppercase tracking-wide">Required</span>
+                    {text.requestType} <span className="ml-1 inline-flex px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] uppercase tracking-wide">{isCnRoute ? "*" : "Required"}</span>
                   </label>
                   <select
                     value={requestType}
                     onChange={(e) => setRequestType(e.target.value as CounterPickupRequestType | '')}
                     className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none"
                   >
-                    <option value="" disabled>Select Request Type</option>
+                    <option value="" disabled>{isCnRoute ? "选择申请类型" : "Select Request Type"}</option>
                     <option value="counterPickup">{text.counterPickupType}</option>
                     <option value="scheduledDelivery">{text.scheduledDeliveryType}</option>
                   </select>
@@ -1177,14 +1284,14 @@ export const CounterPickupListing: React.FC = () => {
 
                 <div className="lg:col-span-3">
                   <label className="block text-sm font-bold text-slate-900 mb-2">
-                    {text.sourceType} <span className="ml-1 inline-flex px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] uppercase tracking-wide">Required</span>
+                    {text.sourceType} <span className="ml-1 inline-flex px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] uppercase tracking-wide">{isCnRoute ? "*" : "Required"}</span>
                   </label>
                   <select
                     value={sourceType}
                     onChange={(e) => setSourceType(e.target.value as CounterPickupSourceType | '')}
                     className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none"
                   >
-                    <option value="" disabled>Select Order Source</option>
+                    <option value="" disabled>{isCnRoute ? "选择订单来源" : "Select Order Source"}</option>
                     <option value="metav">{text.metavSource}</option>
                     <option value="offline">{text.offlineSource}</option>
                     <option value="blackfern">{text.blackfernSource}</option>
@@ -1194,7 +1301,7 @@ export const CounterPickupListing: React.FC = () => {
 
                 <div className="lg:col-span-6" ref={skuRef}>
                   <label className="block text-sm font-bold text-slate-900 mb-2">
-                    {text.skuLabel} <span className="ml-1 inline-flex px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] uppercase tracking-wide">Required</span>
+                    {text.skuLabel} <span className="ml-1 inline-flex px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] uppercase tracking-wide">{isCnRoute ? "*" : "Required"}</span>
                   </label>
                   <div className="relative">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
@@ -1243,7 +1350,7 @@ export const CounterPickupListing: React.FC = () => {
                     </div>
                   )}
 
-                  <p className="mt-2 text-xs text-slate-500">{text.skuHelp}</p>
+                  {!isCnRoute && <p className="mt-2 text-xs text-slate-500">{text.skuHelp}</p>}
                 </div>
 
                 <div className="lg:col-span-2">
@@ -1280,11 +1387,11 @@ export const CounterPickupListing: React.FC = () => {
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-2">Pickup Note</label>
+                  <label className="block text-sm font-medium text-slate-700 mb-2">{isCnRoute ? "提货备注" : "Pickup Note"}</label>
                   <input
                     value={pickupNote}
                     onChange={(e) => setPickupNote(e.target.value)}
-                    placeholder="Internal note for warehouse picking"
+                    placeholder={isCnRoute ? "内部备注" : "Internal note for warehouse picking"}
                     className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none"
                   />
                 </div>
@@ -1295,7 +1402,7 @@ export const CounterPickupListing: React.FC = () => {
                     className="inline-flex items-center gap-2 px-5 py-3 bg-slate-900 text-white rounded-xl font-semibold hover:bg-slate-800 transition-all disabled:opacity-50"
                   >
                     <Plus className="w-4 h-4" />
-                    Add Product
+                    {isCnRoute ? "添加商品" : "Add Product"}
                   </button>
                   <button
                     onClick={handleCreate}
@@ -1310,7 +1417,7 @@ export const CounterPickupListing: React.FC = () => {
 
               {itemsDraft.length > 0 && (
                 <div className="space-y-2">
-                  <div className="text-xs font-bold uppercase tracking-wider text-slate-400">Added Products</div>
+                  <div className="text-xs font-bold uppercase tracking-wider text-slate-400">{isCnRoute ? "已添加商品" : "Added Products"}</div>
                   {itemsDraft.map((item, index) => (
                     <div key={`${item.sku}-${index}`} className="flex items-center justify-between gap-3 bg-slate-50 border border-slate-200 rounded-xl px-4 py-3">
                       <div className="min-w-0">
@@ -1323,7 +1430,7 @@ export const CounterPickupListing: React.FC = () => {
                         onClick={() => setItemsDraft((prev) => prev.filter((_, idx) => idx !== index))}
                         className="text-xs font-semibold text-red-600 hover:text-red-700"
                       >
-                        Remove
+                        {isCnRoute ? "移除" : "Remove"}
                       </button>
                     </div>
                   ))}
@@ -1333,14 +1440,15 @@ export const CounterPickupListing: React.FC = () => {
           )}
 
           {canViewPage && (
-          <section className="bg-white p-3 md:p-4 rounded-2xl border border-slate-100 shadow-sm space-y-4">
-            <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
+          <section className={cn("bg-white p-3 md:p-4 rounded-2xl border border-slate-100 shadow-sm", isCnRoute && "cn-pickup-tools")} aria-label={isCnRoute ? "提货筛选" : "Pickup filters"}>
+            <div className={cn("grid grid-cols-1 gap-3 xl:grid-cols-12", isCnRoute && "cn-pickup-grid")}>
               <div className="xl:col-span-4 relative min-w-0">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
                 <input
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
                   placeholder={text.searchPlaceholder}
+                  aria-label={text.searchPlaceholder}
                   className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none"
                 />
                 {view === 'history' && (
@@ -1364,7 +1472,7 @@ export const CounterPickupListing: React.FC = () => {
                         }}
                         className="text-[11px] font-semibold text-slate-500 hover:text-slate-700"
                       >
-                        Clear filters
+                        {isCnRoute ? "清除筛选" : "Clear filters"}
                       </button>
                     </div>
 
@@ -1417,7 +1525,7 @@ export const CounterPickupListing: React.FC = () => {
                         onChange={(e) => setHistoryTodayOnly(e.target.checked)}
                         className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
                       />
-                      <span>Today</span>
+                      <span>{isCnRoute ? "今天" : "Today"}</span>
                     </label>
                   </div>
                 )}
@@ -1425,6 +1533,7 @@ export const CounterPickupListing: React.FC = () => {
 
               <div className="xl:col-span-2">
                 <select
+                  aria-label={text.statusFilter}
                   value={statusFilter}
                   onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
                   className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none"
@@ -1439,6 +1548,7 @@ export const CounterPickupListing: React.FC = () => {
 
               <div className="xl:col-span-2">
                 <select
+                  aria-label={text.queueFilter}
                   value={queueFilter}
                   onChange={(e) => setQueueFilter(e.target.value as QueueFilter)}
                   className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none"
@@ -1454,6 +1564,7 @@ export const CounterPickupListing: React.FC = () => {
                 <Calendar className="w-5 h-5 text-slate-400" />
                 <input
                   type="date"
+                  aria-label={isCnRoute ? "起始日期" : "Start date"}
                   value={dateRange.start}
                   onChange={(e) => setDateRange((prev) => ({ ...prev, start: e.target.value }))}
                   className="bg-transparent outline-none text-xs flex-1 min-w-0"
@@ -1461,22 +1572,25 @@ export const CounterPickupListing: React.FC = () => {
                 <span className="text-slate-400">-</span>
                 <input
                   type="date"
+                  aria-label={isCnRoute ? "结束日期" : "End date"}
                   value={dateRange.end}
                   onChange={(e) => setDateRange((prev) => ({ ...prev, end: e.target.value }))}
                   className="bg-transparent outline-none text-xs flex-1 min-w-0"
                 />
               </div>
 
-              <div className="xl:col-span-3 flex items-center justify-start xl:justify-end gap-3 flex-wrap">
+              <div className={cn("xl:col-span-3 flex items-center gap-2 flex-wrap", isCnRoute && "cn-pickup-actions")}>
                 <div className="inline-flex items-center gap-1 bg-slate-100 p-1 rounded-xl">
                   <button
                     onClick={() => setView('active')}
+                    aria-pressed={view === 'active'}
                     className={cn('px-3 py-1.5 rounded-lg text-xs font-bold transition-all', view === 'active' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500')}
                   >
                     {text.active}
                   </button>
                   <button
                     onClick={() => setView('history')}
+                    aria-pressed={view === 'history'}
                     className={cn('px-3 py-1.5 rounded-lg text-xs font-bold transition-all', view === 'history' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500')}
                   >
                     {text.history}
@@ -1485,32 +1599,39 @@ export const CounterPickupListing: React.FC = () => {
                 <button
                   type="button"
                   onClick={handleExportFilteredList}
+                  disabled={exporting || listLoading || Boolean(currentHistory?.error)}
                   className="inline-flex items-center gap-2 px-4 py-2.5 bg-slate-900 text-white rounded-xl text-xs font-bold hover:bg-slate-800 transition-all"
                 >
                   <Archive className="w-4 h-4" />
-                  Export Excel
+                  {isCnRoute ? "导出 Excel" : "Export Excel"}
                 </button>
               <button
                 type="button"
                 onClick={handleExportDailyPickupHistory}
+                disabled={exporting}
                 className="inline-flex items-center gap-2 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-xs font-bold hover:bg-indigo-700 transition-all ml-2"
               >
                 <Clock className="w-4 h-4" />
-                Export Daily Pickup History
+                {isCnRoute ? "导出当天记录" : "Export Daily Pickup History"}
               </button>
               <input
                 type="date"
+                aria-label={isCnRoute ? "导出日期" : "Export date"}
                 value={dailyExportDate}
                 onChange={(e) => setDailyExportDate(e.target.value)}
                 className="ml-2 px-3 py-2.5 bg-white border border-slate-200 rounded-xl text-xs font-semibold text-slate-700"
               />
             </div>
-              <div className="xl:col-span-9 flex items-center justify-end">
+              <div className={cn("xl:col-span-9 flex flex-wrap items-center justify-end gap-2", isCnRoute && "cn-pickup-assignment")}>
+                {isCnRoute && <select aria-label="仓库" value={warehouseFilter} onChange={event => setWarehouseFilter(event.target.value)} className="rounded border bg-white px-2 py-1 text-sm">
+                  <option value="">全部仓库</option><option value="AKL">奥克兰</option><option value="CHC">基督城</option>
+                </select>}
                 <div className="inline-flex items-center gap-1 bg-slate-100 p-1 rounded-xl">
                   {(['All', 'My Pending', 'My Created'] as CounterListTab[]).map((tab) => (
                     <button
                       key={tab}
                       onClick={() => setCounterTab(tab)}
+                      aria-pressed={counterTab === tab}
                       className={cn(
                         'px-3 py-1.5 rounded-lg text-xs font-bold transition-all',
                         counterTab === tab ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500'
@@ -1525,20 +1646,23 @@ export const CounterPickupListing: React.FC = () => {
           </section>
           )}
 
-          {canViewPage && (loading ? (
+          {pagedHistory && currentHistory?.error && <div role="alert" className="rounded border bg-white p-3 text-red-700">
+            {currentHistory.error} <button type="button" className="underline" onClick={() => setHistoryRefresh(value => value + 1)}>重试</button>
+          </div>}
+          {canViewPage && (listLoading ? (
             <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-12 text-center">
               <Clock className="w-10 h-10 text-slate-300 mx-auto mb-4 animate-pulse" />
               <p className="text-slate-500">{text.loading}</p>
             </div>
           ) : filteredRequests.length === 0 ? (
             <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-12 text-center">
-              <Package className="w-12 h-12 text-slate-300 mx-auto mb-4" />
-              <p className="text-slate-500">{text.empty}</p>
+              <Package className="mx-auto mb-3 size-7 text-slate-400" aria-hidden="true" />
+              <p className="text-sm text-slate-600">{isCnRoute ? "暂无提货记录" : text.empty}</p>
             </div>
           ) : (
             <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
               <div className="overflow-x-auto">
-                <table className="w-full table-fixed text-left">
+                <table className={cn("w-full table-fixed text-left", isCnRoute && "min-w-[620px]")}>
                   <thead className="bg-slate-50 text-slate-500 text-[11px] uppercase">
                     <tr>
                       <th className="px-3 py-3 w-[18%] md:w-[10%]">{text.requestNo}</th>
@@ -1557,10 +1681,10 @@ export const CounterPickupListing: React.FC = () => {
                       )}
                       {view === 'history' && (
                         <>
-                          <th className="hidden md:table-cell px-3 py-3 w-[10%]">Comment</th>
+                          <th className="hidden md:table-cell px-3 py-3 w-[10%]">{isCnRoute ? "备注" : "Comment"}</th>
                         </>
                       )}
-                      <th className="px-3 py-3 w-[12%] text-right">Actions</th>
+                      <th className="px-3 py-3 w-[12%] text-right">{isCnRoute ? "操作" : "Actions"}</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-50">
@@ -1592,7 +1716,7 @@ export const CounterPickupListing: React.FC = () => {
                                 ))}
                                 className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 hover:text-indigo-700"
                               >
-                                {isExpandedHistory(item.id) ? 'Hide details' : 'View details'}
+                                {isExpandedHistory(item.id) ? (isCnRoute ? '收起详情' : 'Hide details') : (isCnRoute ? '查看详情' : 'View details')}
                               </button>
                             </div>
                           </td>
@@ -1846,7 +1970,16 @@ export const CounterPickupListing: React.FC = () => {
             </div>
           ))}
 
-          {canViewPage && !loading && filteredRequests.length > 0 && (
+          {pagedHistory && !listLoading && (filteredRequests.length > 0 || cursors.length > 1 || nextHistoryCursor) && (
+            <div className="flex items-center justify-between rounded border bg-white px-4 py-3">
+              <span className="text-sm text-slate-700">第 {cursors.length} 页 · {historyRows.length} 条商品记录</span>
+              <div className="flex items-center gap-3">
+                <button type="button" className="disabled:text-slate-400" disabled={cursors.length === 1} onClick={() => setHistoryCursors({ key: historyQuery, entries: cursors.slice(0, -1) })}>{text.prev}</button>
+                <button type="button" className="disabled:text-slate-400" disabled={!nextHistoryCursor} onClick={() => nextHistoryCursor && setHistoryCursors({ key: historyQuery, entries: [...cursors, nextHistoryCursor] })}>{text.next}</button>
+              </div>
+            </div>
+          )}
+          {canViewPage && !pagedHistory && !loading && filteredRequests.length > 0 && (
             <div className="flex items-center justify-between bg-white border border-slate-100 rounded-xl px-4 py-3">
               <p className="text-sm text-slate-500">
                 {text.showing} {(currentPage - 1) * PAGE_SIZE + 1}-{Math.min(currentPage * PAGE_SIZE, filteredRequests.length)} {text.of} {filteredRequests.length}

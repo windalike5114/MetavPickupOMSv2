@@ -257,8 +257,9 @@ export const UserManagement = () => {
   return (
     <div className="flex flex-col h-full w-full bg-slate-50 overflow-hidden">
       <PageHeader
+        compact={isCnRoute}
         title={isCnRoute ? "账号管理" : "User Management"}
-        subtitle={isCnRoute ? "管理员工账号与权限配置。" : "Manage employee accounts and permissions."}
+        subtitle={isCnRoute ? undefined : "Manage employee accounts and permissions."}
         icon={UserIcon}
         isScrolled={isScrolled}
         actions={

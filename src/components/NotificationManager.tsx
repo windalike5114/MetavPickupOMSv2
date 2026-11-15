@@ -3,9 +3,11 @@ import { usePickingNotifications } from '../hooks/usePickingNotifications';
 import { Bell, Volume2, X, AlertTriangle } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useLocation } from 'react-router-dom';
+import { CN_API_ONLY } from '../constants';
 
 export const NotificationManager: React.FC = () => {
   const location = useLocation();
+  const isCnPortal = CN_API_ONLY || location.pathname === '/cn' || location.pathname.startsWith('/cn/');
   const { audioEnabled, enableAudio, hasPickingPermission } = usePickingNotifications();
   const [showBanner, setShowBanner] = useState(false);
   const [permissionStatus, setPermissionStatus] = useState<any>(
@@ -24,13 +26,13 @@ export const NotificationManager: React.FC = () => {
       ? (permissionStatus !== 'granted' || !audioEnabled)
       : !audioEnabled;
 
-    if (hasPickingPermission && needsPermission) {
+    if (!isCnPortal && hasPickingPermission && needsPermission) {
       const timer = setTimeout(() => setShowBanner(true), 2000);
       return () => clearTimeout(timer);
     } else {
       setShowBanner(false);
     }
-  }, [permissionStatus, audioEnabled, hasPickingPermission]);
+  }, [permissionStatus, audioEnabled, hasPickingPermission, isCnPortal]);
 
   const handleEnableAll = async () => {
     // 1. Request Notification Permission if supported
@@ -56,7 +58,7 @@ export const NotificationManager: React.FC = () => {
 
   return (
     <AnimatePresence>
-      {showBanner && (
+      {showBanner && !isCnPortal && (
         <motion.div
           initial={{ y: 100, opacity: 0 }}
           animate={{ y: 0, opacity: 1 }}

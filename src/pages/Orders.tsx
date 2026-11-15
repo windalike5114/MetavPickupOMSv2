@@ -120,6 +120,9 @@ export const Orders = () => {
   const { bulkUpdateStatus } = useOrderService(token, API_BASE_URL);
   const { taskProgress, setTaskProgress, isMinimized, setIsMinimized, isTaskRunning, setIsTaskRunning } = useTask();
   const location = useLocation();
+  const drilldown = new URLSearchParams(location.search);
+  const pickedDate = location.pathname.startsWith('/cn/') ? drilldown.get('pickedDate') || '' : '';
+  const pickedWarehouse = pickedDate ? drilldown.get('warehouse') || '' : '';
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
@@ -221,7 +224,7 @@ export const Orders = () => {
     const requestedStatus = normalizeStatusFilter(location.state?.statusFilter);
     const requestedThreshold = location.state?.overdueThreshold || 7;
 
-    setStatusFilter(requestedStatus);
+    setStatusFilter(pickedDate ? 'All' : requestedStatus);
     setOverdueThreshold(requestedThreshold);
 
     // Always reset list filters when entering Order List to avoid stale filter state.
@@ -229,8 +232,8 @@ export const Orders = () => {
     setPaymentMethodFilter('All');
     setStoreFilter('All');
     setWarehouseFilter('All');
-    setDateRange({ start: '', end: '' });
-  }, [location.state]);
+    setDateRange({ start: pickedDate, end: pickedDate });
+  }, [location.state, pickedDate, pickedWarehouse]);
 
   useClickOutside(menuRef, () => setActiveMenuId(null));
 
@@ -242,11 +245,13 @@ export const Orders = () => {
   }, [notification]);
 
   useEffect(() => {
+    const controller = new AbortController();
     if (isCnApiMode || activeWarehouse) {
-      fetchOrders();
+      void fetchOrders(controller.signal);
     }
     fetchStores();
-  }, [activeWarehouse, token, isCnApiMode]);
+    return () => controller.abort();
+  }, [activeWarehouse, token, isCnApiMode, pickedDate, pickedWarehouse]);
 
   const fetchStores = async () => {
     try {
@@ -280,15 +285,27 @@ export const Orders = () => {
     }
   };
 
-  const fetchOrders = async () => {
+  const fetchOrders = async (signal?: AbortSignal) => {
     if (!isCnApiMode && !activeWarehouse) return;
     if (!token) return;
     setLoading(true);
     try {
+      if (pickedDate) {
+        setOrders([]);
+        const params = new URLSearchParams({ pickedDate, warehouseId: pickedWarehouse });
+        const response = await fetch(`${API_BASE_URL}/api/orders/list?${params}`, {
+          headers: { 'x-v2-auth-token': `Bearer ${token}` }, signal,
+        });
+        const data = await response.json();
+        if (!response.ok || !data.success) throw new Error(data.error || '无法获取取货明细');
+        if (!signal?.aborted) setOrders(data.orders || []);
+        return;
+      }
       const cacheScope = isCnApiMode ? 'cn-all-v2' : 'nz';
       const warehouseScope = isCnApiMode ? 'all-warehouses' : activeWarehouse;
       const cacheKey = `orders:${cacheScope}:${user?.uid || 'anon'}:${warehouseScope}`;
       const cached = await getOrderCache(cacheKey);
+      if (signal?.aborted) return;
       if (cached?.orders?.length) {
         setOrders(cached.orders);
         setLoading(false);
@@ -308,7 +325,7 @@ export const Orders = () => {
         headers: {
           'x-v2-auth-token': `Bearer ${token}`,
           ...(isCnApiMode ? {} : { 'x-warehouse-id': activeWarehouse || '' })
-        }
+        }, signal
       });
       const raw = await response.text();
       let data: any = null;
@@ -323,6 +340,7 @@ export const Orders = () => {
       if (!data.success) throw new Error(data.error || 'Failed to fetch orders');
       const incoming = (data.orders || []) as Order[];
       const nextOrders = cached?.orders?.length ? mergeOrdersById(cached.orders, incoming) : incoming;
+      if (signal?.aborted) return;
       setOrders(nextOrders);
       const maxMs = Math.max(
         ...nextOrders.map((o: Order) => getOrderSortMs(o)),
@@ -337,6 +355,7 @@ export const Orders = () => {
         updatedAt: new Date().toISOString()
       });
     } catch (err: any) {
+      if (signal?.aborted) return;
       console.error('Error fetching orders:', err);
       setNotification({ message: err.message || 'Failed to fetch orders', type: 'error' });
     } finally {
@@ -409,7 +428,9 @@ export const Orders = () => {
         (warehouseFilter === 'Unassigned' ? !order.warehouseId : order.warehouseId === warehouseFilter);
       
       let matchesDate = true;
-      if (order.createdTime) {
+      if (pickedDate) {
+        matchesDate = true;
+      } else if (order.createdTime) {
         try {
           const orderDate = new Date(order.createdTime).toISOString().split('T')[0];
           matchesDate = (!dateRange.start || orderDate >= dateRange.start) && 
@@ -434,7 +455,7 @@ export const Orders = () => {
       const timeB = b.createdTime ? new Date(b.createdTime).getTime() : 0;
       return timeB - timeA;
     });
-  }, [orders, debouncedSearchTerm, statusFilter, dateRange, paymentMethodFilter, storeFilter, warehouseFilter, overdueThreshold]);
+  }, [orders, debouncedSearchTerm, statusFilter, dateRange, paymentMethodFilter, storeFilter, warehouseFilter, overdueThreshold, pickedDate]);
 
   useEffect(() => {
     setCurrentPage(1);
@@ -963,13 +984,14 @@ export const Orders = () => {
       )}
 
       <PageHeader
+        compact={isCnApiMode}
         title={cnText.orderManagement}
-        subtitle={
+        subtitle={isCnApiMode ? undefined : (
           <>
             <MapPin className="w-4 h-4" />
-            <span>{cnText.warehouse}: <span className="font-bold text-indigo-600">{isCnApiMode ? 'AKL + CHC' : getWarehouseDisplayName(activeWarehouse)}</span></span>
+            <span>{cnText.warehouse}: <span className="font-bold text-indigo-600">{getWarehouseDisplayName(activeWarehouse)}</span></span>
           </>
-        }
+        )}
         icon={ShoppingBag}
         isScrolled={isScrolled}
         actions={
@@ -1054,7 +1076,7 @@ export const Orders = () => {
                 placeholder={cnText.searchPlaceholder}
               />
               <button 
-                onClick={fetchOrders}
+                onClick={() => void fetchOrders()}
                 disabled={loading}
                 className="absolute right-3 top-1/2 -translate-y-1/2 p-1.5 hover:bg-slate-200 rounded-lg transition-colors text-slate-400 hover:text-indigo-600 disabled:opacity-50"
                 title={isCnApiMode ? "刷新订单" : "Refresh orders"}
@@ -1119,7 +1141,10 @@ export const Orders = () => {
                 <option value="Cancelled">Cancelled</option>
               </select>
             </div>
-            <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
+            {pickedDate ? <div className="flex flex-wrap items-center gap-2 rounded border bg-white px-3 py-2 text-sm">
+              <span>实际取货 {pickedDate} · {pickedWarehouse}</span>
+              <Link to={ordersBasePath} className="font-semibold text-blue-800">清除</Link>
+            </div> : <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
               <Calendar className="w-5 h-5 text-slate-400" />
               <input 
                 type="date" 
@@ -1134,7 +1159,7 @@ export const Orders = () => {
                 onChange={(e) => setDateRange({...dateRange, end: e.target.value})}
                 className="bg-transparent outline-none text-xs flex-1"
               />
-            </div>
+            </div>}
             <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
               <CreditCard className="w-5 h-5 text-slate-400" />
               <select
@@ -1193,7 +1218,7 @@ export const Orders = () => {
             <AlertCircle className="w-12 h-12 text-slate-300 mx-auto mb-4" />
             <p className="text-slate-500 font-medium mb-4">{cnText.noOrders}</p>
             <button 
-              onClick={fetchOrders}
+              onClick={() => void fetchOrders()}
               className="px-4 py-2 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-colors text-sm font-medium"
             >
               {cnText.refreshList}

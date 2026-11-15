@@ -72,8 +72,8 @@ export const Login = ({ cnPortal = false }: { cnPortal?: boolean }) => {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
-      <div className="max-w-md w-full bg-white rounded-2xl shadow-md p-8 border border-slate-200">
+    <div className={`min-h-screen bg-slate-50 flex items-center justify-center p-4 ${cnPortal ? "cn-login" : ""}`}>
+      <div className={`max-w-md w-full bg-white rounded-2xl shadow-md p-8 border border-slate-200 ${cnPortal ? "cn-login-card" : ""}`}>
         <div className="text-center mb-8">
           <div 
             className="inline-flex items-center justify-center w-16 h-16 bg-indigo-100 rounded-2xl mb-4 select-none active:scale-95 transition-transform"
@@ -81,9 +81,7 @@ export const Login = ({ cnPortal = false }: { cnPortal?: boolean }) => {
             <Package className="w-8 h-8 text-indigo-600" />
           </div>
           <h1 className="text-2xl font-bold text-slate-900">{cnPortal ? 'WMS 中国门户' : 'Pickup System'}</h1>
-          <p className="text-slate-500 mt-2">
-            {cnPortal ? '请登录中国门户' : 'Internal Order Management'}
-          </p>
+          {!cnPortal && <p className="mt-2 text-slate-500">Internal Order Management</p>}
         </div>
 
 
@@ -162,11 +160,11 @@ export const Login = ({ cnPortal = false }: { cnPortal?: boolean }) => {
           </button>
         </form>
 
-        <div className="mt-8 pt-6 border-t border-slate-100 text-center">
+        {!cnPortal && <div className="mt-8 pt-6 border-t border-slate-100 text-center">
           <p className="text-xs text-slate-400">
             &copy; 2026 Pickup Order Management System. All rights reserved.
           </p>
-        </div>
+        </div>}
       </div>
     </div>
   );

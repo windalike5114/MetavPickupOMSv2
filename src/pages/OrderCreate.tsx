@@ -341,8 +341,9 @@ export const OrderCreate = () => {
   return (
     <div className="flex flex-col h-full w-full bg-slate-50 overflow-hidden">
       <PageHeader
+        compact={isCnRoute}
         title={isCnRoute ? "创建新订单" : "Create New Order"}
-        subtitle={isCnRoute ? "填写信息以创建新的提货订单。" : "Fill in the details to create a new pickup order."}
+        subtitle={isCnRoute ? undefined : "Fill in the details to create a new pickup order."}
         icon={Plus}
         isScrolled={isScrolled}
         maxWidth="max-w-4xl"
@@ -532,7 +533,7 @@ export const OrderCreate = () => {
             {items.length === 0 ? (
               <div className="text-center py-12 border-2 border-dashed border-slate-100 rounded-2xl">
                 <Package className="w-12 h-12 text-slate-200 mx-auto mb-3" />
-                <p className="text-slate-400">{isCnRoute ? '尚未添加商品，请先搜索后添加。' : 'No items added yet. Search above to add items.'}</p>
+                <p className="text-slate-400">{isCnRoute ? '尚未添加商品' : 'No items added yet. Search above to add items.'}</p>
               </div>
             ) : (
               <div className="overflow-hidden border border-slate-100 rounded-xl">

@@ -119,7 +119,6 @@ export const BulkOrderUpload = () => {
   const [availableStoreIds, setAvailableStoreIds] = useState<string[]>([]);
   const text = isCnRoute ? {
     title: '批量导入订单',
-    subtitle: '通过 CSV 批量导入订单（事务安全）',
     downloadTemplate: '下载模板',
     clear: '清空',
     startImport: '开始导入',
@@ -176,7 +175,6 @@ export const BulkOrderUpload = () => {
     fetchedSkusSuffix: '个 SKU'
   } : {
     title: 'Bulk Order Upload',
-    subtitle: 'Import orders using CSV with atomic transaction safety',
     downloadTemplate: 'Download Template',
     clear: 'Clear',
     startImport: 'Start Import',
@@ -712,8 +710,9 @@ export const BulkOrderUpload = () => {
   return (
     <div className="flex flex-col h-full w-full bg-slate-50 overflow-hidden">
       <PageHeader
+        compact={isCnRoute}
         title={text.title}
-        subtitle={text.subtitle}
+        subtitle={isCnRoute ? undefined : 'Import orders using CSV with atomic transaction safety'}
         icon={Upload}
         isScrolled={isScrolled}
         backButton={

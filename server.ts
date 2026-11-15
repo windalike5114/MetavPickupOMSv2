@@ -361,6 +361,55 @@ const buildCounterPickupDetail = (pickup: any) => {
   };
 };
 
+const cnCalendarDate = (value: unknown) => {
+  const text = String(value || "");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
+  const day = DateTime.fromISO(text, { zone: AUCKLAND_TIMEZONE });
+  return day.isValid ? day.startOf("day") : null;
+};
+
+const counterItems = (pickup: any) => Array.isArray(pickup.items) && pickup.items.length
+  ? pickup.items
+  : [{ sku: pickup.sku, productName: pickup.productName, location: pickup.location, qty: pickup.qty,
+       outcome: pickup.outcome, destination: pickup.destination, finalizedAt: pickup.finalizedAt,
+       completedAt: pickup.completedAt, returnRequestedAt: pickup.returnRequestedAt,
+       orderNumber: pickup.orderNumber, referenceNo: pickup.referenceNo, comment: pickup.comment }];
+
+const counterCompletion = (pickup: any, item: any) => {
+  const timestamp = item.finalizedAt || item.completedAt || (pickup.status === "Finalized" ? pickup.finalizedAt || pickup.completedAt : null);
+  return timestamp ? DateTime.fromISO(String(timestamp), { zone: AUCKLAND_TIMEZONE }) : null;
+};
+
+const outboundCompletion = (pickup: any, item: any) => {
+  const outcome = item.outcome || item.destination || pickup.outcome || pickup.destination;
+  if (pickup.expiredBySystem || !outcome || normalizeCounterPickupOutcome(outcome) === "returnedToWarehouse") return null;
+  return counterCompletion(pickup, item);
+};
+
+const returnSelection = (pickup: any, item: any) => {
+  const outcome = item.outcome || item.destination || pickup.outcome || pickup.destination;
+  if (pickup.expiredBySystem || normalizeCounterPickupOutcome(outcome) !== "returnedToWarehouse") return null;
+  const timestamp = item.returnRequestedAt || pickup.returnRequestedAt || item.finalizedAt || item.completedAt ||
+    (pickup.status === "PendingPutback" ? pickup.updatedAt : pickup.finalizedAt || pickup.completedAt);
+  return timestamp ? DateTime.fromISO(String(timestamp), { zone: AUCKLAND_TIMEZONE }) : null;
+};
+
+const withRecordedReturnSelection = async (doc: admin.firestore.QueryDocumentSnapshot) => {
+  const pickup = doc.data();
+  if (pickup.expiredBySystem || pickup.returnRequestedAt || !counterItems(pickup).some((item: any) =>
+    !item.returnRequestedAt && normalizeCounterPickupOutcome(item.outcome || item.destination || pickup.outcome || pickup.destination) === "returnedToWarehouse"
+  )) return pickup;
+
+  // Older clients record the return selection in the request log before changing its state.
+  const selectionLogs = await doc.ref.collection("logs").where("action", "==", "CP_RETURN_INIT").get();
+  let earliest: DateTime | null = null;
+  for (const entry of selectionLogs.docs) {
+    const selected = DateTime.fromISO(String(entry.get("timestamp") || ""), { zone: AUCKLAND_TIMEZONE });
+    if (selected.isValid && (!earliest || selected < earliest)) earliest = selected;
+  }
+  return earliest ? { ...pickup, returnRequestedAt: earliest.toISO() } : pickup;
+};
+
 const getNextCounterPickupId = async (currentDb: admin.firestore.Firestore) => {
   const today = DateTime.now().setZone(AUCKLAND_TIMEZONE).toFormat("yyyyMMdd");
   const counterRef = currentDb.collection("system_counters").doc(`counter_pickups_${today}`);
@@ -606,6 +655,22 @@ async function startServer() {
         return res.status(403).json({ success: false, error: "Forbidden: You do not have access to this warehouse" });
       }
 
+      if (req.query.pickedDate !== undefined) {
+        const day = cnCalendarDate(req.query.pickedDate);
+        if (!day || !["AKL", "CHC"].includes(warehouseId)) {
+          return res.status(400).json({ success: false, error: "Invalid pickup date or warehouse" });
+        }
+        if (!isCnPortal || (!isSuper && !isSales && req.user.role !== "Admin" && !req.user.permissions?.includes("View Orders"))) {
+          return res.status(403).json({ success: false, error: "Forbidden: CN order access required" });
+        }
+        const results = await currentDb.collection("orders")
+          .where("actualPickupTime", ">=", day.toUTC().toISO()!)
+          .where("actualPickupTime", "<", day.plus({ days: 1 }).toUTC().toISO()!).get();
+        const orders = results.docs.map(doc => ({ id: doc.id, ...doc.data() } as any))
+          .filter(order => normalizeWarehouseId(order.warehouseId) === warehouseId).reverse().map(toListOrder);
+        return res.json({ success: true, orders });
+      }
+
       const getOrderSortTime = (o: any) => {
         const updated = o?.updatedAt;
         let updatedMs = 0;
@@ -777,114 +842,85 @@ async function startServer() {
         return res.status(403).json({ success: false, error: "Forbidden: CN portal access required" });
       }
 
-      const requestedDate = String(req.query.date || "").trim();
-      const day = requestedDate
-        ? DateTime.fromISO(requestedDate, { zone: AUCKLAND_TIMEZONE })
-        : DateTime.now().setZone(AUCKLAND_TIMEZONE);
-      if (!day.isValid || (requestedDate && !/^\d{4}-\d{2}-\d{2}$/.test(requestedDate))) {
-        return res.status(400).json({ success: false, error: "Invalid date. Expected YYYY-MM-DD." });
-      }
-
-      const startLocal = day.startOf("day");
-      const endLocal = startLocal.plus({ days: 1 });
-      const startLocalIso = startLocal.toISO();
-      const endLocalIso = endLocal.toISO();
-      const startUtcIso = startLocal.toUTC().toISO();
-      const endUtcIso = endLocal.toUTC().toISO();
-      if (!startLocalIso || !endLocalIso || !startUtcIso || !endUtcIso) {
-        throw new Error("Unable to calculate Auckland day boundaries");
-      }
-
+      const requestedDate = req.query.date;
+      const day = requestedDate ? cnCalendarDate(requestedDate) : DateTime.now().setZone(AUCKLAND_TIMEZONE).startOf("day");
+      const count = req.query.days === "7" ? 7 : 1;
+      if (!day || !day.isValid) return res.status(400).json({ success: false, error: "Invalid date. Expected YYYY-MM-DD." });
+      const start = day.minus({ days: count - 1 });
+      const end = day.plus({ days: 1 });
       const [ordersSnap, counterSnap] = await Promise.all([
-        currentDb.collection("orders")
-          .where("actualPickupTime", ">=", startUtcIso)
-          .where("actualPickupTime", "<", endUtcIso)
-          .get(),
-        currentDb.collection("counter_pickups")
-          .where("updatedAt", ">=", startLocalIso)
-          .where("updatedAt", "<", endLocalIso)
-          .get()
+        currentDb.collection("orders").where("actualPickupTime", ">=", start.toUTC().toISO()!)
+          .where("actualPickupTime", "<", end.toUTC().toISO()!).get(),
+        // A later edit may move updatedAt forward. Only use it as a broad lower bound.
+        currentDb.collection("counter_pickups").where("updatedAt", ">=", start.minus({ days: 1 }).toISO()!).get()
       ]);
-
-      const warehouses: Record<string, any> = {
-        AKL: { warehouseId: "AKL", warehouseName: "Auckland", onlineOrders: 0, onlineItems: 0, localRequests: 0, localItems: 0 },
-        CHC: { warehouseId: "CHC", warehouseName: "Christchurch", onlineOrders: 0, onlineItems: 0, localRequests: 0, localItems: 0 }
-      };
-
-      ordersSnap.docs.forEach((docSnap: any) => {
-        const order = docSnap.data() || {};
-        const warehouseId = normalizeWarehouseId(order.warehouseId);
-        if (!warehouseId || !warehouses[warehouseId]) return;
+      const daily = new Map(Array.from({ length: count }, (_, index) => [
+        start.plus({ days: index }).toISODate()!,
+        Object.fromEntries([["AKL", "Auckland"], ["CHC", "Christchurch"]].map(([warehouseId, warehouseName]) => [
+          warehouseId, { warehouseId, warehouseName, onlineOrders: 0, onlineItems: 0, grossLocalRequests: 0,
+            grossLocalItems: 0, returnRequests: 0, returnOnlyRequests: 0, returnItems: 0 }
+        ]))
+      ] as const));
+      for (const doc of ordersSnap.docs) {
+        const order = doc.data();
+        const warehouse = normalizeWarehouseId(order.warehouseId);
+        const date = DateTime.fromISO(String(order.actualPickupTime), { zone: AUCKLAND_TIMEZONE }).toISODate();
+        const row = warehouse && date ? daily.get(date)?.[warehouse] : undefined;
+        if (!row) continue;
         const items = Array.isArray(order.items) ? order.items : [];
-        const pickedItems = items.some((item: any) => item?.status === "Picked")
-          ? items.filter((item: any) => item?.status === "Picked")
-          : items;
-        warehouses[warehouseId].onlineOrders += 1;
-        warehouses[warehouseId].onlineItems += pickedItems.reduce(
-          (sum: number, item: any) => sum + Math.max(0, Number(item?.qty) || 0),
-          0
-        );
-      });
-
-      counterSnap.docs.forEach((docSnap: any) => {
-        const request = docSnap.data() || {};
-        const warehouseId = normalizeWarehouseId(request.warehouseId);
-        if (!warehouseId || !warehouses[warehouseId] || request.expiredBySystem) return;
-        const items = Array.isArray(request.items) && request.items.length
-          ? request.items
-          : [{
-              qty: request.qty,
-              outcome: request.outcome,
-              destination: request.destination,
-              finalizedAt: request.finalizedAt || request.completedAt || request.updatedAt
-            }];
-        const completedOutboundItems = items.filter((item: any) => {
-          const rawOutcome = item?.outcome || item?.destination || request.outcome || request.destination;
-          if (!rawOutcome) return false;
-          const outcome = normalizeCounterPickupOutcome(rawOutcome);
-          if (outcome === "returnedToWarehouse") return false;
-          const finalizedAt = item?.finalizedAt || item?.completedAt || (
-            request.status === "Finalized"
-              ? request.finalizedAt || request.completedAt || request.updatedAt
-              : null
-          );
-          if (!finalizedAt) return false;
-          const finalizedMs = DateTime.fromISO(String(finalizedAt), { zone: AUCKLAND_TIMEZONE }).toMillis();
-          return finalizedMs >= startLocal.toMillis() && finalizedMs < endLocal.toMillis();
+        const picked = items.filter((item: any) => item?.status === "Picked");
+        row.onlineOrders += 1;
+        row.onlineItems += (picked.length ? picked : items).reduce((sum: number, item: any) => sum + Math.max(0, Number(item?.qty) || 0), 0);
+      }
+      const countCounterPickup = (pickup: admin.firestore.DocumentData) => {
+        const warehouse = normalizeWarehouseId(pickup.warehouseId);
+        if (!warehouse) return;
+        const requestDays = new Map<string, { outbound: boolean; returned: boolean }>();
+        for (const item of counterItems(pickup)) {
+          const returned = returnSelection(pickup, item);
+          const date = (returned || outboundCompletion(pickup, item))?.toISODate();
+          const row = date ? daily.get(date)?.[warehouse] : undefined;
+          if (!row || !date) continue;
+          const flags = requestDays.get(date) || { outbound: false, returned: false };
+          requestDays.set(date, flags);
+          const qty = Math.max(0, Number(item.qty) || 0);
+          row.grossLocalItems += qty;
+          if (returned) {
+            flags.returned = true;
+            row.returnItems += qty;
+          } else {
+            flags.outbound = true;
+          }
+        }
+        for (const [date, flags] of requestDays) {
+          const row = daily.get(date)![warehouse];
+          row.grossLocalRequests += 1;
+          if (flags.returned) row.returnRequests += 1;
+          if (flags.returned && !flags.outbound) row.returnOnlyRequests += 1;
+        }
+      };
+      for (let index = 0; index < counterSnap.docs.length; index += 20) {
+        const pickups = await Promise.all(counterSnap.docs.slice(index, index + 20).map(withRecordedReturnSelection));
+        pickups.forEach(countCounterPickup);
+      }
+      const days = [...daily].map(([date, byWarehouse]) => {
+        const warehouses = Object.values(byWarehouse).map(row => {
+          const localRequests = row.grossLocalRequests - row.returnOnlyRequests;
+          const localItems = row.grossLocalItems - row.returnItems;
+          return { ...row, localRequests, localItems, totalTransactions: row.onlineOrders + localRequests, totalItems: row.onlineItems + localItems };
         });
-        if (!completedOutboundItems.length) return;
-        warehouses[warehouseId].localRequests += 1;
-        warehouses[warehouseId].localItems += completedOutboundItems.reduce(
-          (sum: number, item: any) => sum + Math.max(0, Number(item?.qty) || 0),
-          0
-        );
+        const totals = warehouses.reduce((sum, row) => ({
+          onlineOrders: sum.onlineOrders + row.onlineOrders, onlineItems: sum.onlineItems + row.onlineItems,
+          localRequests: sum.localRequests + row.localRequests, localItems: sum.localItems + row.localItems,
+          grossLocalRequests: sum.grossLocalRequests + row.grossLocalRequests, grossLocalItems: sum.grossLocalItems + row.grossLocalItems,
+          returnRequests: sum.returnRequests + row.returnRequests, returnOnlyRequests: sum.returnOnlyRequests + row.returnOnlyRequests,
+          returnItems: sum.returnItems + row.returnItems,
+          totalTransactions: sum.totalTransactions + row.totalTransactions, totalItems: sum.totalItems + row.totalItems
+        }), { onlineOrders: 0, onlineItems: 0, localRequests: 0, localItems: 0, grossLocalRequests: 0, grossLocalItems: 0,
+          returnRequests: 0, returnOnlyRequests: 0, returnItems: 0, totalTransactions: 0, totalItems: 0 });
+        return { date, warehouses, totals };
       });
-
-      const rows = [warehouses.AKL, warehouses.CHC].map((row: any) => ({
-        ...row,
-        totalTransactions: row.onlineOrders + row.localRequests,
-        totalItems: row.onlineItems + row.localItems
-      }));
-      const totals = rows.reduce(
-        (summary: any, row: any) => ({
-          onlineOrders: summary.onlineOrders + row.onlineOrders,
-          onlineItems: summary.onlineItems + row.onlineItems,
-          localRequests: summary.localRequests + row.localRequests,
-          localItems: summary.localItems + row.localItems,
-          totalTransactions: summary.totalTransactions + row.totalTransactions,
-          totalItems: summary.totalItems + row.totalItems
-        }),
-        { onlineOrders: 0, onlineItems: 0, localRequests: 0, localItems: 0, totalTransactions: 0, totalItems: 0 }
-      );
-
-      return res.json({
-        success: true,
-        date: startLocal.toFormat("yyyy-MM-dd"),
-        timezone: AUCKLAND_TIMEZONE,
-        generatedAt: nowAucklandIso(),
-        warehouses: rows,
-        totals
-      });
+      return res.json({ success: true, ...days[days.length - 1], days, timezone: AUCKLAND_TIMEZONE, generatedAt: nowAucklandIso() });
     } catch (error: any) {
       console.error("CN Dashboard Stats Error:", error);
       return res.status(500).json({ success: false, error: error.message || "Failed to load dashboard statistics" });
@@ -1000,6 +1036,66 @@ async function startServer() {
       const isSuper = SUPER_ADMINS.includes((req.user.username || "").toLowerCase());
       const isCnPortal = isCnPortalRequest(req);
       const allowedWarehouses: string[] = req.user.allowedWarehouses || [];
+
+      if (isCnPortal && view === "history" && req.query.paged === "1") {
+        if (!isSuper && !isFrontDeskRole(req.user) && !req.user.permissions?.includes("Manage Picking")) {
+          return res.status(403).json({ success: false, error: "Forbidden: Counter pickup access required" });
+        }
+        const warehouse = String(req.query.warehouse || "");
+        const after = String(req.query.after || "");
+        const start = cnCalendarDate(req.query.start);
+        const endDay = cnCalendarDate(req.query.end);
+        const businessDay = cnCalendarDate(req.query.businessDate);
+        if ((warehouse && !["AKL", "CHC"].includes(warehouse)) || after.includes("/") || after.length > 200 ||
+            (req.query.start && !start) || (req.query.end && !endDay) || (req.query.businessDate && !businessDay) ||
+            (start && endDay && start > endDay)) {
+          return res.status(400).json({ success: false, error: "Invalid history filters" });
+        }
+        const from = businessDay ? businessDay.minus({ days: 1 }).set({ hour: 15 }) : start;
+        const until = businessDay ? businessDay.set({ hour: 15 }) : endDay?.plus({ days: 1 });
+        const sources = String(req.query.sources || "").split(",").filter(Boolean);
+        const types = String(req.query.types || "").split(",").filter(Boolean);
+        const search = String(req.query.search || "").trim().toLowerCase();
+        const outboundOnly = req.query.outbound === "1" || Boolean(businessDay);
+        const rows: any[] = [];
+        let cursor = after;
+        const size = Math.min(250, Math.floor(limitValue));
+        const base = currentDb.collection("counter_pickups").orderBy(admin.firestore.FieldPath.documentId(), "desc");
+        let nextCursor: string | null = null;
+        for (let batchIndex = 0; batchIndex < 6; batchIndex += 1) {
+          const batch = await (cursor ? base.startAfter(cursor) : base).limit(200).get();
+          for (const doc of batch.docs) {
+            cursor = doc.id;
+            const pickup = { ...doc.data(), id: doc.id } as any;
+            const wh = normalizeWarehouseId(pickup.warehouseId);
+            if (!wh || !["AKL", "CHC"].includes(wh) || (warehouse && wh !== warehouse)) continue;
+            if (!outboundOnly && pickup.status !== "Finalized") continue;
+            if (req.query.status && pickup.status !== req.query.status) continue;
+            if (req.query.queue && pickup.queueStatus !== req.query.queue) continue;
+            if (req.query.mine === "1" && pickup.createdByUid !== req.user.uid) continue;
+            if (req.query.pending === "1" && pickup.status === "Finalized") continue;
+            if (sources.length && !sources.includes(pickup.sourceType)) continue;
+            if (types.length && !types.includes(pickup.requestType || "counterPickup")) continue;
+            const items = counterItems(pickup);
+            const haystack = [doc.id, pickup.sku, pickup.productName, pickup.location, pickup.createdBy, pickup.orderNumber,
+              pickup.referenceNo, pickup.comment, ...items.flatMap((item: any) => [item.sku, item.productName, item.location, item.qty,
+                item.orderNumber, item.comment, item.outcome])].join(" ").toLowerCase();
+            if (search && !haystack.includes(search)) continue;
+            const matchedItemIndexes = items.flatMap((item: any, index: number) => {
+              if (!from && !until && !outboundOnly) return [index];
+              const completed = outboundOnly ? outboundCompletion(pickup, item) : counterCompletion(pickup, item);
+              if (!completed?.isValid || (from && completed < from) || (until && completed >= until)) return [];
+              return [index];
+            });
+            if (!matchedItemIndexes.length) continue;
+            if (rows.length === size) { nextCursor = rows[rows.length - 1].id; break; }
+            rows.push({ ...buildCounterPickupDetail(pickup), matchedItemIndexes });
+          }
+          if (nextCursor || batch.size < 200) break;
+          if (batchIndex === 5) nextCursor = cursor;
+        }
+        return res.json({ success: true, requests: rows, nextCursor });
+      }
 
       let warehouseIds: string[] = [];
       if (isCnPortal) {
@@ -1639,6 +1735,7 @@ async function startServer() {
 
         if (itemAction.outcome === "returnedToWarehouse") {
           itemUpdate.status = "PendingPutback";
+          itemUpdate.returnRequestedAt = item.returnRequestedAt || timestamp;
           itemUpdate.finalizedAt = null;
           itemUpdate.finalizedBy = null;
           itemUpdate.completedAt = null;
@@ -1684,6 +1781,7 @@ async function startServer() {
       const anyPendingPutback = updatedItems.some((item: any) => item.outcome === "returnedToWarehouse");
       if (anyPendingPutback) {
         updatePayload.status = "PendingPutback";
+        updatePayload.returnRequestedAt = data.returnRequestedAt || timestamp;
         updatePayload.otherNotes = null;
         updatePayload.referenceNo = null;
         updatePayload.orderNumber = null;
@@ -1770,6 +1868,7 @@ async function startServer() {
       const timestamp = nowAucklandIso();
       await docRef.set({
         status: "Finalized",
+        returnRequestedAt: data.returnRequestedAt || data.updatedAt || timestamp,
         finalizedAt: timestamp,
         finalizedBy: req.user.name || req.user.username,
         completedAt: timestamp,

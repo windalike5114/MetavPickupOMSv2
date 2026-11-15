@@ -9,6 +9,7 @@ interface PageHeaderProps {
   actions?: React.ReactNode;
   backButton?: React.ReactNode;
   isScrolled?: boolean;
+  compact?: boolean;
   className?: string;
   maxWidth?: string;
   children?: React.ReactNode; // For search/filters
@@ -21,6 +22,7 @@ export const PageHeader: React.FC<PageHeaderProps> = ({
   actions,
   backButton,
   isScrolled,
+  compact = false,
   className,
   maxWidth = "max-w-[1600px]",
   children
@@ -31,16 +33,17 @@ export const PageHeader: React.FC<PageHeaderProps> = ({
       isScrolled 
         ? "shadow-lg backdrop-blur-md bg-white/80" 
         : "shadow-sm bg-white",
+      compact && "cn-page-header",
       className
     )}>
       <div className={cn(
         "mx-auto px-4 md:px-8 transition-all duration-500 ease-in-out",
         maxWidth,
-        isScrolled ? "py-2 group-hover:py-6" : "py-6"
+        compact ? "py-4" : isScrolled ? "py-2 group-hover:py-6" : "py-6"
       )}>
         <div className={cn(
           "flex flex-col md:flex-row md:items-center justify-between gap-4 transition-all duration-500",
-          isScrolled ? "mb-1 group-hover:mb-6" : "mb-6"
+          compact ? (children ? "mb-4" : "mb-0") : isScrolled ? "mb-1 group-hover:mb-6" : "mb-6"
         )}>
           <div className="flex items-center gap-4">
             {backButton && (
@@ -51,18 +54,18 @@ export const PageHeader: React.FC<PageHeaderProps> = ({
             {Icon && (
               <div className={cn(
                 "w-12 h-12 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center transition-all duration-500",
-                isScrolled ? "w-8 h-8 group-hover:w-12 group-hover:h-12" : "w-12 h-12"
+                compact ? "cn-header-icon size-8" : isScrolled ? "w-8 h-8 group-hover:w-12 group-hover:h-12" : "w-12 h-12"
               )}>
                 <Icon className={cn(
                   "transition-all duration-500",
-                  isScrolled ? "w-4 h-4 group-hover:w-6 group-hover:h-6" : "w-6 h-6"
+                  compact ? "size-4" : isScrolled ? "w-4 h-4 group-hover:w-6 group-hover:h-6" : "w-6 h-6"
                 )} />
               </div>
             )}
             <div>
               <h1 className={cn(
                 "font-bold text-slate-900 tracking-tight transition-all duration-500",
-                isScrolled ? "text-lg group-hover:text-3xl" : "text-3xl"
+                compact ? "text-xl sm:text-2xl" : isScrolled ? "text-lg group-hover:text-3xl" : "text-3xl"
               )}>
                 {title}
               </h1>
@@ -81,7 +84,7 @@ export const PageHeader: React.FC<PageHeaderProps> = ({
           {actions && (
             <div className={cn(
               "flex flex-wrap items-center gap-3 transition-all duration-500",
-              isScrolled ? "scale-90 origin-right group-hover:scale-100" : ""
+              !compact && isScrolled ? "scale-90 origin-right group-hover:scale-100" : ""
             )}>
               {actions}
             </div>
@@ -91,7 +94,7 @@ export const PageHeader: React.FC<PageHeaderProps> = ({
         {children && (
           <div className={cn(
             "transition-all duration-500 ease-in-out origin-top",
-            isScrolled 
+            !compact && isScrolled
               ? "h-0 opacity-0 pointer-events-none group-hover:h-auto group-hover:opacity-100 group-hover:pointer-events-auto group-hover:mt-4" 
               : "h-auto opacity-100 mt-0"
           )}>
