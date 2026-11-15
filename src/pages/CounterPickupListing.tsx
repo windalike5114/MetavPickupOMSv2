@@ -142,6 +142,7 @@ type CounterPickupRow = {
     referenceNo?: string | null;
     comment?: string | null;
     finalizedAt?: string | null;
+    archiveEdited?: boolean;
   };
   itemIndex: number;
 };
@@ -1230,7 +1231,8 @@ export const CounterPickupListing: React.FC = () => {
         destinationLabelForHistory(item as any, request),
         historyCommentLabel(item as any, request),
         request.requestType === 'scheduledDelivery' ? 'Scheduled Delivery' : 'Counter Pickup',
-        request.createdAt ? formatDate(request.createdAt, 'yyyy-MM-dd HH:mm') : ''
+        request.createdAt ? formatDate(request.createdAt, 'yyyy-MM-dd HH:mm') : '',
+        item.archiveEdited ? 'Yes' : 'No'
       ]);
 
       summaryMap.set(sku, (summaryMap.get(sku) || 0) + qty);
@@ -1308,7 +1310,8 @@ export const CounterPickupListing: React.FC = () => {
         destinationLabelForHistory(item as any, request),
         historyCommentLabel(item as any, request),
         requestType === 'scheduledDelivery' ? 'Scheduled Delivery' : 'Counter Pickup',
-        formatDate(finalizedDate, 'yyyy-MM-dd HH:mm')
+        formatDate(finalizedDate, 'yyyy-MM-dd HH:mm'),
+        item.archiveEdited ? 'Yes' : 'No'
       ]);
 
       summaryMap.set(sku, (summaryMap.get(sku) || 0) + qty);
