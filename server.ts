@@ -437,6 +437,16 @@ import { writeLog, readLogs, clearLogs } from './src/lib/logger';
 
 async function startServer() {
   const app = express();
+
+  app.use((req, res, next) => {
+    const isMainHost = ['acapickup.com', 'www.acapickup.com'].includes(req.hostname.toLowerCase());
+    if ((req.method === 'GET' || req.method === 'HEAD') && isMainHost &&
+        (req.path === '/cn' || req.path.startsWith('/cn/'))) {
+      res.set('Cache-Control', 'no-store');
+      return res.redirect(302, `https://cn.acapickup.com${req.originalUrl}`);
+    }
+    next();
+  });
   
   // 1. CORS 配置 (必须在所有路由之前)
   app.use(cors({

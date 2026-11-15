@@ -30,7 +30,7 @@ export const CnPortalLayout: React.FC<{ children: React.ReactNode }> = ({ childr
 
   const handleLogout = () => {
     logout();
-    navigate('/login');
+    navigate('/cn/login', { replace: true });
   };
 
   const navItems: CnNavItem[] = [
