@@ -56,7 +56,7 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
       items: [
         { name: 'Dashboard', path: '/', icon: LayoutDashboard, visible: hasPermission(profile, 'View Orders', profile?.email) && profile?.roleTemplate !== 'Warehouse' },
         { name: 'Order List', path: '/orders', icon: ClipboardList, visible: hasPermission(profile, 'View Orders', profile?.email) && profile?.roleTemplate !== 'Warehouse' },
-        { name: 'Counter Pickup', path: '/counter-pickups', icon: AlertCircle, visible: profile?.roleTemplate === 'Reception' || profile?.roleTemplate === 'Admin' },
+        { name: 'Counter Pickup', path: '/counter-pickups', icon: AlertCircle, visible: profile?.roleTemplate === 'Sales' || profile?.roleTemplate === 'Reception' || profile?.roleTemplate === 'Admin' || profile?.roleTemplate === 'Warehouse' || hasPermission(profile, 'Manage Picking', profile?.username || profile?.email) },
         { name: 'Overdue Audit', path: '/overdue', icon: Clock, visible: hasPermission(profile, 'Audit Overdue Orders', profile?.email) && profile?.roleTemplate !== 'Warehouse' },
         { name: 'SKU Database', path: '/skus', icon: Database, visible: hasPermission(profile, 'View SKU', profile?.email) && profile?.roleTemplate !== 'Warehouse' },
         { name: 'Field Visits', path: '/field-visits', icon: MapPinned, visible: !!profile },

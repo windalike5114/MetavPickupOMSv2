@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   Archive,
   Calendar,
+  CalendarClock,
   ClipboardList,
   Clock,
   Pencil,
@@ -15,6 +16,7 @@ import {
   Send,
 } from 'lucide-react';
 import { PageHeader } from '../components/PageHeader';
+import { ReserveQueueDrawer } from '../components/ReserveQueueDrawer';
 import { useAuth } from '../components/AuthProvider';
 import { useClickOutside } from '../hooks/useClickOutside';
 import { CounterPickup, CounterPickupOutcome, CounterPickupQueueStatus, CounterPickupRequestType, CounterPickupSourceType, CounterPickupStatus, SKU } from '../types';
@@ -475,6 +477,8 @@ export const CounterPickupListing: React.FC = () => {
   const [exporting, setExporting] = useState(false);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [reserveQueueOpen, setReserveQueueOpen] = useState(false);
+  const creating = useRef(false);
   const [requests, setRequests] = useState<CounterPickup[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('All');
@@ -520,6 +524,7 @@ export const CounterPickupListing: React.FC = () => {
   useClickOutside(skuRef, () => setDraft((prev) => ({ ...prev, showSkuResults: false })));
 
   const canCreate = !isCnRoute && (profile?.roleTemplate === 'Reception' || profile?.roleTemplate === 'Admin');
+  const canReserve = canCreate || (!isCnRoute && profile?.roleTemplate === 'Sales');
   const canManageWarehouse =
     !isCnRoute && (
       profile?.roleTemplate === 'Warehouse' ||
@@ -648,8 +653,8 @@ export const CounterPickupListing: React.FC = () => {
   };
 
   useEffect(() => {
-    if (!pagedHistory) void loadRequests(view);
-  }, [token, activeWarehouse, view, pagedHistory]);
+    if (canViewPage && !pagedHistory) void loadRequests(view);
+  }, [token, activeWarehouse, view, pagedHistory, canViewPage]);
 
   useEffect(() => {
     if (suppressSkuSearchRef.current) {
@@ -774,8 +779,8 @@ export const CounterPickupListing: React.FC = () => {
     setDraft(createEmptyDraft());
   };
 
-  const handleCreate = async () => {
-    if (!token) return;
+  const handleCreate = async (reserve = false) => {
+    if (!token || creating.current || submitting) return;
     const combinedItems = [...itemsDraft];
     const pending = currentItem();
     if (pending.sku) combinedItems.push(pending);
@@ -789,6 +794,7 @@ export const CounterPickupListing: React.FC = () => {
       return;
     }
 
+    creating.current = true;
     setSubmitting(true);
     try {
       const response = await fetch('/api/counter-pickups/create', {
@@ -802,17 +808,23 @@ export const CounterPickupListing: React.FC = () => {
         items: combinedItems,
         pickupNote,
         requestType,
-        sourceType
+        sourceType,
+        reserve
       })
       });
       const data = await response.json();
       if (!response.ok || !data.success) throw new Error(data.error || text.createError);
-      setView('active');
       resetCreateForm();
-      await loadRequests('active');
+      if (reserve) {
+        setReserveQueueOpen(true);
+      } else {
+        setView('active');
+        await loadRequests('active');
+      }
     } catch (err: any) {
       alert(err.message || text.createError);
     } finally {
+      creating.current = false;
       setSubmitting(false);
     }
   };
@@ -1350,27 +1362,59 @@ export const CounterPickupListing: React.FC = () => {
         icon={ClipboardList}
         isScrolled={isScrolled}
         actions={
-          canCreate ? (
-            <button
+          <div className="flex flex-wrap items-center gap-2">
+            {(canReserve || canManageWarehouse) && (
+              <button type="button" onClick={() => setReserveQueueOpen(true)} className="inline-flex items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2 font-semibold text-slate-800 hover:bg-slate-100">
+                <CalendarClock className="h-4 w-4" aria-hidden="true" /> Reserve Queue
+              </button>
+            )}
+            {canReserve && <button
               onClick={() => setShowCreateForm((prev) => !prev)}
               className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-xl font-semibold hover:bg-indigo-700 transition-all"
             >
               <Plus className="w-4 h-4" />
               {showCreateForm ? text.hideCreate : text.showCreate}
-            </button>
-          ) : undefined
+            </button>}
+          </div>
         }
       />
+
+      {token && !reserveQueueOpen && (canReserve || canManageWarehouse) && (
+        <button
+          type="button"
+          aria-label="Open reserve queue"
+          title="Reserve Queue"
+          onClick={() => setReserveQueueOpen(true)}
+          className="fixed right-0 top-1/2 z-40 -translate-y-1/2 rounded-l-xl bg-indigo-700 p-3 text-white shadow-lg hover:bg-indigo-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700"
+        >
+          <CalendarClock className="h-5 w-5" aria-hidden="true" />
+        </button>
+      )}
+
+      {token && reserveQueueOpen && (canReserve || canManageWarehouse) && (
+        <ReserveQueueDrawer
+          token={token}
+          warehouse={activeWarehouse}
+          canManage={canReserve}
+          onClose={() => setReserveQueueOpen(false)}
+          onSent={async () => {
+            if (canViewPage) {
+              setView('active');
+              await loadRequests('active');
+            }
+          }}
+        />
+      )}
 
       <div className={cn("flex-1 overflow-y-auto p-4 md:p-8", isCnRoute && "cn-work-area")}>
         <div ref={sentinelRef} className="h-px w-full pointer-events-none -mt-8" />
         <div className="w-full mx-auto space-y-6">
-          {!canViewPage ? (
+          {!canViewPage && !canReserve ? (
             <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-12 text-center">
               <ClipboardList className="w-12 h-12 text-slate-300 mx-auto mb-4" />
               <p className="text-slate-500">You do not have access to Counter Pickup.</p>
             </div>
-          ) : canCreate && showCreateForm && (
+          ) : canReserve && showCreateForm && (
             <section className="bg-white p-4 md:p-6 rounded-2xl border border-slate-100 shadow-sm space-y-5">
               <div>
                 <h2 className="text-lg font-bold text-slate-900">{text.createRequest}</h2>
@@ -1507,7 +1551,7 @@ export const CounterPickupListing: React.FC = () => {
                     className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none"
                   />
                 </div>
-                <div className="flex items-end justify-end gap-2">
+                <div className="flex flex-wrap items-end justify-end gap-2">
                   <button
                     onClick={addDraftItem}
                     disabled={!canAddDraftItem()}
@@ -1517,13 +1561,22 @@ export const CounterPickupListing: React.FC = () => {
                     {isCnRoute ? "添加商品" : "Add Product"}
                   </button>
                   <button
-                    onClick={handleCreate}
+                    type="button"
+                    onClick={() => void handleCreate(true)}
+                    disabled={submitting || (itemsDraft.length === 0 && !canAddDraftItem()) || !requestType || !sourceType}
+                    className="inline-flex items-center gap-2 rounded-xl border border-indigo-300 bg-white px-4 py-3 font-semibold text-indigo-800 hover:bg-indigo-50 disabled:opacity-50"
+                  >
+                    <CalendarClock className="h-4 w-4" />
+                    Add to Reserve Queue
+                  </button>
+                  {canCreate && <button
+                    onClick={() => void handleCreate()}
                     disabled={submitting || (itemsDraft.length === 0 && !canAddDraftItem()) || !requestType || !sourceType}
                     className="inline-flex items-center gap-2 px-5 py-3 bg-indigo-600 text-white rounded-xl font-semibold hover:bg-indigo-700 transition-all disabled:opacity-50"
                   >
                     <Send className="w-4 h-4" />
                     {text.submit}
-                  </button>
+                  </button>}
                 </div>
               </div>
 

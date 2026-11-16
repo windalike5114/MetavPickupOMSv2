@@ -272,6 +272,11 @@ export interface CounterPickup {
   updatedAt: string;
 }
 
+export type CounterPickupReservation = Omit<CounterPickup, 'status' | 'queueStatus'> & {
+  reservationStatus: 'Reserved' | 'Sent' | 'Released';
+  expiresAt: string;
+};
+
 export const PERMISSIONS = [
   'Create Order', 'Edit Order', 'View Orders', 'Search Orders',
   'Add Order Items', 'Edit Order Items',

@@ -435,20 +435,18 @@ const withRecordedReturnSelection = async (doc: admin.firestore.QueryDocumentSna
   return earliest ? { ...pickup, returnRequestedAt: earliest.toISO() } : pickup;
 };
 
-const getNextCounterPickupId = async (currentDb: admin.firestore.Firestore) => {
+const allocateCounterPickupId = async (
+  currentDb: admin.firestore.Firestore,
+  tx: admin.firestore.Transaction,
+  prefix: "CP" | "RES" = "CP"
+) => {
   const today = DateTime.now().setZone(AUCKLAND_TIMEZONE).toFormat("yyyyMMdd");
-  const counterRef = currentDb.collection("system_counters").doc(`counter_pickups_${today}`);
-  const sequence = await currentDb.runTransaction(async (tx) => {
-    const snap = await tx.get(counterRef);
-    const current = snap.exists ? Number(snap.data()?.seq || 0) : 0;
-    const next = current + 1;
-    tx.set(counterRef, {
-      seq: next,
-      updatedAt: nowAucklandIso()
-    }, { merge: true });
-    return next;
-  });
-  return `CP-${today}-${String(sequence).padStart(3, "0")}`;
+  const counter = prefix === "RES" ? "counter_pickup_reservations" : "counter_pickups";
+  const counterRef = currentDb.collection("system_counters").doc(`${counter}_${today}`);
+  const snap = await tx.get(counterRef);
+  const next = Number(snap.data()?.seq || 0) + 1;
+  tx.set(counterRef, { seq: next, updatedAt: nowAucklandIso() }, { merge: true });
+  return `${prefix}-${today}-${String(next).padStart(3, "0")}`;
 };
 
 const expireStaleCounterPickups = async (currentDb: admin.firestore.Firestore) => {
@@ -1412,12 +1410,116 @@ async function startServer() {
     }
   });
 
+  const canManageReservations = (user: any) =>
+    isFrontDeskRole(user) || (user.roleTemplate || user.role) === "Sales";
+
+  const canAccessReservationWarehouse = (req: any, warehouseId: string) => {
+    const allowed: string[] = req.user.allowedWarehouses || [];
+    return typeof warehouseId === "string" && warehouseId.length > 0 && warehouseId !== "*" &&
+      (!isCnPortalRequest(req) || ["AKL", "CHC"].includes(warehouseId)) &&
+      (!req.selectedWarehouse || req.selectedWarehouse === warehouseId) &&
+      (isSuperAdmin(req.user.username || "") || allowed.includes("*") || allowed.includes(warehouseId));
+  };
+
+  app.get("/api/counter-pickups/reservations", authenticate, async (req: any, res) => {
+    if (!canManageReservations(req.user) && !isWarehouseRole(req.user) && !hasPermission(req.user, "Manage Picking")) {
+      return res.status(403).json({ success: false, error: "Counter pickup access required" });
+    }
+    const currentDb = await initDb();
+    if (!currentDb) return res.status(503).json({ success: false, error: "Database not initialized" });
+    try {
+      const active = currentDb.collection("counter_pickup_reservations").where("reservationStatus", "==", "Reserved");
+      const snapshot = await (req.selectedWarehouse ? active.where("warehouseId", "==", req.selectedWarehouse) : active).get();
+      const reservations = snapshot.docs.map(doc => doc.data())
+        .filter(row => canAccessReservationWarehouse(req, row.warehouseId))
+        .sort((a, b) => Date.parse(a.expiresAt) - Date.parse(b.expiresAt));
+      return res.json({ success: true, reservations });
+    } catch (error) {
+      console.error("Counter Pickup Reservation List Error:", error);
+      return res.status(500).json({ success: false, error: "Could not load reservations" });
+    }
+  });
+
+  app.post("/api/counter-pickups/reservations/:id/:action", authenticate, async (req: any, res) => {
+    if (isCnPortalRequest(req) || !canManageReservations(req.user)) {
+      return res.status(403).json({ success: false, error: "Reception access required" });
+    }
+    const { id, action } = req.params;
+    if (!id || id.includes("/") || !["send", "extend", "release"].includes(action)) {
+      return res.status(400).json({ success: false, error: "Invalid reservation action" });
+    }
+    const entered = req.body?.expiresAt;
+    const expiry = action === "extend" && typeof entered === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(entered)
+      ? DateTime.fromISO(entered, { zone: AUCKLAND_TIMEZONE })
+      : null;
+    if (action === "extend" && (!expiry?.isValid || expiry.toMillis() <= Date.now())) {
+      return res.status(400).json({ success: false, error: "Enter a future Auckland expiry time" });
+    }
+
+    const currentDb = await initDb();
+    if (!currentDb) return res.status(503).json({ success: false, error: "Database not initialized" });
+    const reservation = currentDb.collection("counter_pickup_reservations").doc(id);
+    try {
+      const result = await currentDb.runTransaction(async tx => {
+        const snapshot = await tx.get(reservation);
+        const data = snapshot.data();
+        if (!data) return { status: 404, error: "Reservation not found" };
+        if (!canAccessReservationWarehouse(req, data.warehouseId)) return { status: 403, error: "Warehouse access required" };
+        if ((action === "send" && data.reservationStatus === "Sent") ||
+            (action === "release" && data.reservationStatus === "Released")) {
+          return { status: 200, pickupId: data.pickupId || (action === "send" ? id : undefined) };
+        }
+        if (data.reservationStatus !== "Reserved") return { status: 409, error: "Reservation already processed" };
+        if (expiry && expiry.toMillis() <= Date.parse(data.expiresAt)) {
+          return { status: 400, error: "The new expiry must be later than the current expiry" };
+        }
+
+        const timestamp = nowAucklandIso();
+        const operator = req.user.name || req.user.username;
+        const event = {
+          timestamp,
+          operator,
+          operatorUid: req.user.uid,
+          action,
+          previousExpiry: data.expiresAt,
+          expiresAt: expiry?.toISO() || data.expiresAt
+        };
+        let pickupId: string | undefined;
+        if (action === "send") {
+          pickupId = await allocateCounterPickupId(currentDb, tx);
+          const pickup = currentDb.collection("counter_pickups").doc(pickupId);
+          const { reservationStatus, expiresAt, ...request } = data;
+          tx.create(pickup, {
+            ...request, id: pickupId, reservationId: id, status: "PendingPick", queueStatus: "Pending",
+            reservedAt: request.createdAt, createdAt: timestamp, updatedAt: timestamp
+          });
+          tx.create(pickup.collection("logs").doc(), {
+            timestamp, operator, action: "CP_RESERVATION_SENT", detail: "Reservation " + id + " moved to pending pickup."
+          });
+        }
+        tx.update(reservation, {
+          reservationStatus: action === "send" ? "Sent" : action === "release" ? "Released" : "Reserved",
+          expiresAt: event.expiresAt,
+          ...(pickupId ? { pickupId } : {}),
+          updatedAt: timestamp
+        });
+        tx.create(reservation.collection("logs").doc(), pickupId ? { ...event, pickupId } : event);
+        return { status: 200, pickupId };
+      });
+      return res.status(result.status).json(result.error ? { success: false, error: result.error } : { success: true, pickupId: result.pickupId });
+    } catch (error) {
+      console.error("Counter Pickup Reservation Action Error:", error);
+      return res.status(500).json({ success: false, error: "Could not update reservation" });
+    }
+  });
+
   app.post("/api/counter-pickups/create", authenticate, async (req: any, res) => {
     const currentDb = await initDb();
     if (!currentDb) return res.status(503).json({ success: false, error: "Database not initialized" });
 
     try {
-      if (!isFrontDeskRole(req.user)) {
+      const reserve = req.body?.reserve === true;
+      if (!(reserve ? canManageReservations(req.user) : isFrontDeskRole(req.user))) {
         return res.status(403).json({ success: false, error: "Forbidden: Reception access required" });
       }
 
@@ -1434,6 +1536,9 @@ async function startServer() {
       const warehouseId = requestedWh || (req.user.allowedWarehouses || [])[0] || "";
 
       if (!warehouseId) return res.status(400).json({ success: false, error: "Warehouse is required" });
+      if (reserve && (isCnPortalRequest(req) || !canAccessReservationWarehouse(req, warehouseId))) {
+        return res.status(403).json({ success: false, error: "Warehouse access required" });
+      }
       const normalizedItems = incomingItems.length > 0
         ? incomingItems
         : (rawSku ? [{ sku: rawSku, qty, productName: manualProductName, location: manualLocation }] : []);
@@ -1466,7 +1571,7 @@ async function startServer() {
         });
       }
 
-      const counterPickupId = await getNextCounterPickupId(currentDb);
+      const counterPickupId = await currentDb.runTransaction(tx => allocateCounterPickupId(currentDb, tx, reserve ? "RES" : "CP"));
       const timestamp = nowAucklandIso();
       const primaryItem = resolvedItems[0];
       const payload = {
@@ -1501,6 +1606,24 @@ async function startServer() {
         createdAt: timestamp,
         updatedAt: timestamp
       };
+
+      if (reserve) {
+        const { status, queueStatus, ...details } = payload;
+        const reservation = {
+          ...details,
+          reservationStatus: "Reserved",
+          expiresAt: DateTime.fromISO(timestamp!).plus({ hours: 24 }).toISO()
+        };
+        const ref = currentDb.collection("counter_pickup_reservations").doc(counterPickupId);
+        const batch = currentDb.batch();
+        batch.create(ref, reservation);
+        batch.create(ref.collection("logs").doc(), {
+          timestamp, operator: payload.createdBy, operatorUid: req.user.uid,
+          action: "create", expiresAt: reservation.expiresAt
+        });
+        await batch.commit();
+        return res.json({ success: true, request: reservation });
+      }
 
       await currentDb.collection("counter_pickups").doc(counterPickupId).set(payload);
       await writeCounterPickupLog(
