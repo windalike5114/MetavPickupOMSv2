@@ -2,6 +2,7 @@ import React from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   ClipboardList,
+  Database,
   Clock,
   Home,
   LogOut,
@@ -33,6 +34,7 @@ export const CnPortalLayout: React.FC<{ children: React.ReactNode }> = ({ childr
   const navItems: CnNavItem[] = [
     { name: '业务总览', path: '/cn', icon: Home, visible: true },
     { name: '订单列表', path: '/cn/orders', icon: ClipboardList, visible: hasPermission(profile, 'View Orders', profile?.email) },
+    { name: 'SKU 资料库', path: '/cn/skus', icon: Database, visible: hasPermission(profile, 'View SKU', profile?.email) && profile?.roleTemplate !== 'Warehouse' },
     { name: '线下出库记录', path: '/cn/counter-pickups', icon: PackageCheck, visible: profile?.roleTemplate === 'Reception' || profile?.roleTemplate === 'Admin' || hasPermission(profile, 'Manage Picking', profile?.email) },
     { name: '超期订单', path: '/cn/overdue', icon: Clock, visible: hasPermission(profile, 'Audit Overdue Orders', profile?.email) || hasPermission(profile, 'View Orders', profile?.email) },
     { name: '账号管理', path: '/cn/users', icon: Users, visible: isAdmin(profile, profile?.email) || hasPermission(profile, 'Manage Users', profile?.email) },

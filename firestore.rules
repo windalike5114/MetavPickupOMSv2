@@ -113,7 +113,7 @@ service cloud.firestore {
     // SKU 集合 (默认放行读，限制写)
     match /skus/{skuId} {
       allow read: if isAuthenticated();
-      allow write: if hasPermission('Manage SKUs');
+      allow write: if false; // SKU mutations use server-side authorization.
     }
 
     // 门店集合
