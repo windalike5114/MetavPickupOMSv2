@@ -1021,7 +1021,7 @@ export const Orders = () => {
                 <LayoutGrid className="w-5 h-5" />
               </button>
             </div>
-            {!isCnApiMode && hasPermission(profile, 'Create Order', profile?.username || profile?.email) && (
+            {hasPermission(profile, 'Create Order', profile?.username || profile?.email) && (
               <Link 
                 to={`${ordersBasePath}/bulk-import`}
                 className={cn(
@@ -1036,7 +1036,7 @@ export const Orders = () => {
                 )}>{cnText.bulkImport}</span>
               </Link>
             )}
-            {!isCnApiMode && hasPermission(profile, 'Create Order', profile?.username || profile?.email) && (
+            {hasPermission(profile, 'Create Order', profile?.username || profile?.email) && (
               <Link 
                 to={`${ordersBasePath}/create`}
                 className={cn(

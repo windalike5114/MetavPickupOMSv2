@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { collection, query, getDocs, deleteDoc, doc } from 'firebase/firestore';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { db } from '../firebase';
 import { useAuth } from '../components/AuthProvider';
 import { Store } from '../types';
@@ -21,7 +21,8 @@ import {
 import { PageHeader } from '../components/PageHeader';
 
 export const StoreManagement = () => {
-  const { profile, user } = useAuth();
+  const { profile, user, token } = useAuth();
+  const isCnRoute = useLocation().pathname.startsWith("/cn");
   const [stores, setStores] = useState<Store[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -59,27 +60,35 @@ export const StoreManagement = () => {
 
   useEffect(() => {
     if (!loading && !canManage) {
-      navigate('/');
+      navigate(isCnRoute ? '/cn' : '/');
     }
-  }, [loading, canManage, navigate]);
+  }, [loading, canManage, navigate, isCnRoute]);
 
   useEffect(() => {
     console.log("🔥 正在连接的项目 ID:", db.app.options.projectId);
     if (canManage) {
       fetchStores();
     }
-  }, [canManage]);
+  }, [canManage, isCnRoute, token]);
 
   const fetchStores = async () => {
     setLoading(true);
     try {
-      const q = query(collection(db, 'stores'));
-      const snap = await getDocs(q);
-      const storesList = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Store));
+      let storesList: Store[];
+      if (isCnRoute) {
+        const response = await fetch('/api/stores/list?management=1', { headers: { 'x-v2-auth-token': token || '' }, cache: 'no-store' });
+        const data = await response.json();
+        if (!response.ok || !data.success) throw new Error(data.error || '无法加载门店。');
+        storesList = data.stores;
+      } else {
+        const snapshot = await getDocs(query(collection(db, 'stores')));
+        storesList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Store));
+      }
       storesList.sort((a, b) => a.storeId.localeCompare(b.storeId));
       setStores(storesList);
     } catch (err: any) {
       console.error('Error fetching stores:', err);
+      if (isCnRoute) { setError(err.message || '无法加载门店。'); return; }
       try {
         handleFirestoreError(err, OperationType.LIST, 'stores');
       } catch (formattedError: any) {
@@ -122,7 +131,7 @@ export const StoreManagement = () => {
       }
 
       setSuccess(`Store "${store.storeId}" deleted successfully.`);
-      if (profile) {
+      if (profile && !isCnRoute) {
         await logAction(profile, 'Delete Store', `Deleted store configuration for ${store.storeId}`, null, 'Store');
       }
       setShowDeleteConfirm(null);
@@ -136,6 +145,8 @@ export const StoreManagement = () => {
     }
   };
 
+  if (isCnRoute && !canManage) return <p role="alert" className="p-6">此账号没有门店管理权限。</p>;
+
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
@@ -147,8 +158,9 @@ export const StoreManagement = () => {
   return (
     <div className="flex flex-col h-full w-full bg-slate-50 overflow-hidden">
       <PageHeader
-        title="Store Management"
-        subtitle="Manage store-specific SMTP settings and email templates."
+        compact={isCnRoute}
+        title={isCnRoute ? "门店管理" : "Store Management"}
+        subtitle={isCnRoute ? undefined : "Manage store-specific SMTP settings and email templates."}
         icon={StoreIcon}
         isScrolled={isScrolled}
         actions={

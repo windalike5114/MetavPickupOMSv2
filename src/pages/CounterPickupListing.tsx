@@ -1899,7 +1899,7 @@ export const CounterPickupListing: React.FC = () => {
                           </td>
                           <td className="px-3 py-3 align-top">
                             <div className="flex justify-end gap-1.5 flex-wrap">
-                              {canCreate && item.status === 'Finalized' && (
+                              {(canCreate || (isCnRoute && ['Admin', 'Reception'].includes(profile?.roleTemplate || '') && (profile?.allowedWarehouses?.includes('*') || profile?.allowedWarehouses?.includes(item.warehouseId)))) && item.status === 'Finalized' && (
                                 <button
                                   type="button"
                                   onClick={() => {
@@ -1974,7 +1974,7 @@ export const CounterPickupListing: React.FC = () => {
                                     </div>
                                   </div>
                                 )}
-                                {!isCnRoute && token && !!item.archiveRevision && (
+                                {token && !!item.archiveRevision && (
                                   <ArchiveRevisionHistory request={item} token={token} formatOutcome={outcomeLabel} />
                                 )}
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-2 max-h-72 overflow-y-auto pr-1">

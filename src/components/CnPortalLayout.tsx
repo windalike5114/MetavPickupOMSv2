@@ -7,6 +7,7 @@ import {
   LogOut,
   PackageCheck,
   Users,
+  Store,
   Warehouse,
 } from 'lucide-react';
 import { useAuth } from './AuthProvider';
@@ -36,6 +37,8 @@ export const CnPortalLayout: React.FC<{ children: React.ReactNode }> = ({ childr
     { name: '线下出库记录', path: '/cn/counter-pickups', icon: PackageCheck, visible: profile?.roleTemplate === 'Reception' || profile?.roleTemplate === 'Admin' || hasPermission(profile, 'Manage Picking', profile?.email) },
     { name: '超期订单', path: '/cn/overdue', icon: Clock, visible: hasPermission(profile, 'Audit Overdue Orders', profile?.email) || hasPermission(profile, 'View Orders', profile?.email) },
     { name: '账号管理', path: '/cn/users', icon: Users, visible: isAdmin(profile, profile?.email) || hasPermission(profile, 'Manage Users', profile?.email) },
+    { name: "用户组", path: "/cn/groups", icon: Users, visible: isAdmin(profile, profile?.email) || hasPermission(profile, "Manage User Groups", profile?.email) },
+    { name: "门店管理", path: "/cn/stores", icon: Store, visible: isAdmin(profile, profile?.email) || hasPermission(profile, "Manage Stores", profile?.email) },
   ];
 
   const visibleNavItems = navItems.filter((item) => item.visible);

@@ -24,10 +24,12 @@ import {
   UserPlus
 } from 'lucide-react';
 
+import { useLocation } from 'react-router-dom';
 import { PageHeader } from '../components/PageHeader';
 
 export default function UserGroups() {
-  const { profile: currentProfile, user } = useAuth();
+  const { profile: currentProfile, user, token } = useAuth();
+  const isCnRoute = useLocation().pathname.startsWith("/cn");
   const [groups, setGroups] = useState<UserGroup[]>([]);
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [loading, setLoading] = useState(true);
@@ -64,7 +66,25 @@ export default function UserGroups() {
 
   const canManage = isAdmin(currentProfile, currentProfile?.email) || hasPermission(currentProfile, 'Manage User Groups', currentProfile?.email);
 
+  const loadCnGroups = async () => {
+    if (!canManage || !token) { setLoading(false); return; }
+    setLoading(true);
+    setError('');
+    try {
+      const response = await fetch('/api/user-groups/list', { headers: { 'x-v2-auth-token': token }, cache: 'no-store' });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.error || '无法加载用户组。');
+      setGroups(data.groups);
+      setUsers(data.users);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : '无法加载用户组。');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
+    if (isCnRoute) { void loadCnGroups(); return; }
     let retryCount = 0;
     const MAX_RETRIES = 10;
     let unsubscribeGroups: (() => void) | null = null;
@@ -114,7 +134,7 @@ export default function UserGroups() {
       if (unsubscribeGroups) unsubscribeGroups();
       if (retryTimeout) clearTimeout(retryTimeout);
     };
-  }, []);
+  }, [isCnRoute, canManage, token]);
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -146,6 +166,7 @@ export default function UserGroups() {
       }
 
       closeModal();
+      if (isCnRoute) await loadCnGroups();
     } catch (error: any) {
       console.error("Error saving group:", error);
       setError(`Failed to save group: ${error.message}`);
@@ -170,6 +191,7 @@ export default function UserGroups() {
       }
 
       setShowDeleteConfirm(null);
+      if (isCnRoute) await loadCnGroups();
     } catch (error: any) {
       console.error("Error deleting group:", error);
       setError(`Failed to delete group: ${error.message}`);
@@ -217,8 +239,9 @@ export default function UserGroups() {
   return (
     <div className="flex flex-col h-full w-full bg-slate-50 overflow-hidden">
       <PageHeader
-        title="User Groups"
-        subtitle="Manage groups for targeted notifications"
+        compact={isCnRoute}
+        title={isCnRoute ? "用户组" : "User Groups"}
+        subtitle={isCnRoute ? undefined : "Manage groups for targeted notifications"}
         icon={Users}
         isScrolled={isScrolled}
         actions={

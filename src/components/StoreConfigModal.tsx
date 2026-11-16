@@ -4,6 +4,7 @@ import { doc, setDoc } from 'firebase/firestore';
 import { db } from '../firebase';
 import { handleFirestoreError, OperationType, logAction } from '../utils';
 import { Store, UserProfile } from '../types';
+import { useLocation } from 'react-router-dom';
 import { useAuth } from './AuthProvider';
 
 interface Props {
@@ -15,6 +16,7 @@ interface Props {
 
 export const StoreConfigModal: React.FC<Props> = ({ isOpen, onClose, onSave, editingStore }) => {
   const { profile } = useAuth();
+  const isCnRoute = useLocation().pathname.startsWith("/cn");
   const [activeTab, setActiveTab] = useState<'general' | 'template'>('general');
   const [store, setStore] = useState<Store>({
     storeId: '',
@@ -65,8 +67,8 @@ export const StoreConfigModal: React.FC<Props> = ({ isOpen, onClose, onSave, edi
           senderEmail: editingStore.senderEmail || '',
           template: {
             ...editingStore.template,
-            subject: editingStore.template.subject || '',
-            body: editingStore.template.body || ''
+            subject: editingStore.template?.subject || '',
+            body: editingStore.template?.body || ''
           }
         });
       } else {
@@ -117,7 +119,7 @@ export const StoreConfigModal: React.FC<Props> = ({ isOpen, onClose, onSave, edi
         throw new Error(result.error || 'Failed to save store');
       }
 
-      if (profile) {
+      if (profile && !isCnRoute) {
         await logAction(profile, editingStore ? 'Edit Store' : 'Add Store', `${editingStore ? 'Updated' : 'Added'} store configuration for ${store.storeId}`, null, 'Store');
       }
       onSave?.();

@@ -139,6 +139,7 @@ export const OrderDetail: React.FC = () => {
   }, []);
   
   // Edit Form State
+  const [orderVersion, setOrderVersion] = useState<string>();
   const [editForm, setEditForm] = useState<Partial<Order>>({});
   const [skuSearch, setSkuSearch] = useState('');
   const [skuResults, setSkuResults] = useState<SKU[]>([]);
@@ -325,6 +326,7 @@ export const OrderDetail: React.FC = () => {
           throw new Error(data.error || 'Failed to load order details');
         }
         const orderData = data.order as Order;
+        setOrderVersion(data.orderVersion);
         setOrder(orderData);
         setEditForm(orderData);
         return;
@@ -506,14 +508,14 @@ export const OrderDetail: React.FC = () => {
         updatedData.paymentMethod = null;
       }
 
-      const response = await fetch('/api/orders/update', {
-        method: 'POST',
+      const response = await fetch(isCnApiMode ? '/api/cn/orders/' + encodeURIComponent(id) : '/api/orders/update', {
+        method: isCnApiMode ? 'PATCH' : 'POST',
         headers: {
           'Content-Type': 'application/json',
           'x-v2-auth-token': `Bearer ${token}`,
           'x-warehouse-id': activeWarehouse || ''
         },
-        body: JSON.stringify({
+        body: JSON.stringify(isCnApiMode ? { action: 'edit', changes: updatedData, orderVersion } : {
           orderId: id,
           updateData: updatedData
         })
@@ -571,14 +573,14 @@ export const OrderDetail: React.FC = () => {
     }
 
     try {
-      const response = await fetch('/api/orders/update', {
-        method: 'POST',
+      const response = await fetch(isCnApiMode ? '/api/cn/orders/' + encodeURIComponent(id) : '/api/orders/update', {
+        method: isCnApiMode ? 'PATCH' : 'POST',
         headers: {
           'Content-Type': 'application/json',
           'x-v2-auth-token': `Bearer ${token}`,
           'x-warehouse-id': activeWarehouse || ''
         },
-        body: JSON.stringify({
+        body: JSON.stringify(isCnApiMode ? { action: 'payment', changes: updateData, orderVersion } : {
           orderId: id,
           updateData
         })
@@ -646,14 +648,14 @@ export const OrderDetail: React.FC = () => {
     }
     
     try {
-      const response = await fetch('/api/orders/update', {
-        method: 'POST',
+      const response = await fetch(isCnApiMode ? '/api/cn/orders/' + encodeURIComponent(id) : '/api/orders/update', {
+        method: isCnApiMode ? 'PATCH' : 'POST',
         headers: {
           'Content-Type': 'application/json',
           'x-v2-auth-token': `Bearer ${token}`,
           'x-warehouse-id': activeWarehouse || ''
         },
-        body: JSON.stringify({
+        body: JSON.stringify(isCnApiMode ? { action: 'cancel', orderVersion } : {
           orderId: id,
           updateData: { status: newStatus }
         })
@@ -1114,7 +1116,7 @@ export const OrderDetail: React.FC = () => {
         }
         actions={
           <>
-            {!isCnApiMode && hasPermission(profile, 'Edit Order', profile?.username || profile?.email) && order.status !== 'Cancelled' && !isOrderLocked && (
+            {hasPermission(profile, 'Edit Order', profile?.username || profile?.email) && order.status !== 'Cancelled' && !isOrderLocked && (!isCnApiMode || (order.status === 'Created' && !order.warehouseStatus && !order.pickupExceptionStatus)) && (
               <button
                 onClick={() => setIsEditing(true)}
                 className="inline-flex items-center px-3 py-1.5 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-700 hover:bg-slate-50 transition-all"
@@ -1124,17 +1126,17 @@ export const OrderDetail: React.FC = () => {
               </button>
             )}
 
-            {!isCnApiMode && (hasPermission(profile, 'Add Payment', profile?.username || profile?.email) || hasPermission(profile, 'Edit Payment', profile?.username || profile?.email)) && order.status !== 'Cancelled' && !isOrderLocked && (
+            {(hasPermission(profile, 'Edit Payment', profile?.username || profile?.email) || ((!isCnApiMode || order.paymentStatus !== 'Paid') && hasPermission(profile, 'Add Payment', profile?.username || profile?.email))) && order.status !== 'Cancelled' && !isOrderLocked && (!isCnApiMode || (order.status === 'Created' && !order.pickupExceptionStatus)) && (
               <button
                 onClick={openPaymentEditor}
                 className="inline-flex items-center px-3 py-1.5 bg-emerald-50 border border-emerald-200 rounded-xl text-xs font-bold text-emerald-700 hover:bg-emerald-100 transition-all"
               >
                 <CreditCard className="w-3.5 h-3.5 mr-1.5" />
-                Update Payment
+                {isCnApiMode ? "登记付款" : "Update Payment"}
               </button>
             )}
             
-            {hasPermission(profile, 'Print Pick List', profile?.username || profile?.email) && (
+            {!isCnApiMode && hasPermission(profile, 'Print Pick List', profile?.username || profile?.email) && (
               <button
                 onClick={handlePrint}
                 className="inline-flex items-center px-3 py-1.5 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-700 hover:bg-slate-50 transition-all"
@@ -1194,7 +1196,7 @@ export const OrderDetail: React.FC = () => {
               </button>
             )}
 
-            {!isCnApiMode && hasPermission(profile, 'Cancel Orders', profile?.username || profile?.email) && order.status !== 'Cancelled' && (
+            {hasPermission(profile, 'Cancel Orders', profile?.username || profile?.email) && order.status !== 'Cancelled' && (!isCnApiMode || (order.status === 'Created' && !order.warehouseStatus && !order.pickupExceptionStatus && order.paymentStatus !== 'Paid')) && (
               <button
                 onClick={() => handleStatusChange('Cancelled')}
                 className="inline-flex items-center px-3 py-1.5 bg-red-50 rounded-xl text-xs font-bold text-red-600 hover:bg-red-100 transition-all"
@@ -1938,7 +1940,7 @@ export const OrderDetail: React.FC = () => {
                       <input
                         type="date"
                         value={editForm.pickupDateScheduled?.split('T')[0] || ''}
-                        onChange={e => setEditForm({ ...editForm, pickupDateScheduled: new Date(e.target.value).toISOString() })}
+                        onChange={e => setEditForm({ ...editForm, pickupDateScheduled: e.target.value ? new Date(e.target.value).toISOString() : null })}
                         className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                       />
                     </div>

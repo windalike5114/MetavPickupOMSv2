@@ -3,7 +3,7 @@ import { collection, query, where, getDocs, orderBy } from 'firebase/firestore';
 import { db } from '../firebase';
 import { useAuth } from '../components/AuthProvider';
 import { SKU, OrderItem, Store, UserProfile, UserGroup } from '../types';
-import { handleFirestoreError, OperationType, resolveRecipients, cn, getSkuWarehouseLocation } from '../utils';
+import { handleFirestoreError, OperationType, resolveRecipients, cn, getSkuWarehouseLocation, hasPermission } from '../utils';
 import { useClickOutside } from '../hooks/useClickOutside';
 import { 
   Plus, 
@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import { SUPER_ADMINS } from '../lib/auth-shared';
-import { API_BASE_URL, CN_API_ONLY } from '../constants';
+import { API_BASE_URL } from '../constants';
 import { useLocation } from 'react-router-dom';
 
 import { PageHeader } from '../components/PageHeader';
@@ -32,7 +32,7 @@ export const OrderCreate = () => {
   const location = useLocation();
   const routePrefix = location.pathname.startsWith('/cn') ? '/cn' : '';
   const isCnRoute = routePrefix === '/cn';
-  const isCnApiMode = CN_API_ONLY && routePrefix === '/cn';
+  const canCreate = hasPermission(profile, 'Create Order', profile?.username || profile?.email);
   const ordersBasePath = `${routePrefix}/orders`;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -98,7 +98,7 @@ export const OrderCreate = () => {
   useEffect(() => {
     const fetchStores = async () => {
       try {
-        if (isCnApiMode) {
+        if (isCnRoute) {
           if (!token) return;
           const response = await fetch(`${API_BASE_URL}/api/stores/list`, {
             headers: {
@@ -137,7 +137,7 @@ export const OrderCreate = () => {
       }
     };
     fetchStores();
-  }, [isCnApiMode, token, activeWarehouse]);
+  }, [isCnRoute, token, activeWarehouse]);
   
   useEffect(() => {
     const fetchUsersAndGroups = async () => {
@@ -167,13 +167,13 @@ export const OrderCreate = () => {
         console.error('Error fetching users/groups:', err);
       }
     };
-    fetchUsersAndGroups();
-  }, []);
+    if (!isCnRoute && canCreate) void fetchUsersAndGroups();
+  }, [isCnRoute, canCreate]);
 
   useEffect(() => {
     if (skuSearch.length >= 2) {
       const fetchSKUs = async () => {
-        if (isCnApiMode) {
+        if (isCnRoute) {
           if (!token) return;
           const params = new URLSearchParams({ q: skuSearch, limit: '50' });
           const response = await fetch(`${API_BASE_URL}/api/skus/search?${params.toString()}`, {
@@ -198,12 +198,16 @@ export const OrderCreate = () => {
         setSkuResults(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as SKU)));
         setShowSkuResults(true);
       };
-      fetchSKUs();
+      void fetchSKUs().catch(err => {
+        console.error("SKU search failed:", err);
+        setSkuResults([]);
+        setShowSkuResults(true);
+      });
     } else {
       setSkuResults([]);
       setShowSkuResults(false);
     }
-  }, [skuSearch, isCnApiMode, token, activeWarehouse]);
+  }, [skuSearch, isCnRoute, token, activeWarehouse]);
 
   const addItem = (sku?: SKU) => {
     if (sku) {
@@ -216,7 +220,7 @@ export const OrderCreate = () => {
         setItems([...items, { 
           sku: sku.sku, 
           productName: sku.productName, 
-          location: getSkuWarehouseLocation(sku, activeWarehouse), 
+          location: isCnRoute ? "" : getSkuWarehouseLocation(sku, activeWarehouse),
           qty: 1, 
           unit_price: 0 
         }]);
@@ -249,7 +253,7 @@ export const OrderCreate = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!profile) return;
+    if (!canCreate || !token || loading) return;
 
     // Logic: If Booking Number is empty, use Customer Reference
     let finalBookingNumber = bookingNumber.trim().toUpperCase();
@@ -260,13 +264,13 @@ export const OrderCreate = () => {
     }
 
     if (!finalBookingNumber) {
-      setError('Booking Number cannot be empty');
+      setError(isCnRoute ? '请填写预约单号或客户参考号。' : 'Booking Number cannot be empty');
       window.scrollTo({ top: 0, behavior: 'smooth' });
       return;
     }
 
     if (items.length === 0) {
-      setError('Please add at least one item to the order.');
+      setError(isCnRoute ? '请至少添加一件商品。' : 'Please add at least one item to the order.');
       window.scrollTo({ top: 0, behavior: 'smooth' });
       return;
     }
@@ -281,7 +285,7 @@ export const OrderCreate = () => {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-v2-auth-token': `Bearer ${localStorage.getItem('x-v2-auth-token')}`,
+          'x-v2-auth-token': `Bearer ${token}`,
           'x-warehouse-id': activeWarehouse || ''
         },
         body: JSON.stringify({
@@ -305,7 +309,7 @@ export const OrderCreate = () => {
       const data = await response.json();
       console.log("📡 [Server Response]:", data);
 
-      if (!data.success) {
+      if (!response.ok || !data.success) {
         console.error("❌ [Order Creation Failed]:", data);
         throw new Error(data.error || 'Failed to create order');
       }
@@ -327,7 +331,11 @@ export const OrderCreate = () => {
     }
   };
 
-  if (!activeWarehouse) {
+  if (!canCreate) {
+    return <p role="alert" className="p-6 text-sm text-slate-700">{isCnRoute ? "此账号没有创建订单权限。" : "You do not have permission to create orders."}</p>;
+  }
+
+  if (!isCnRoute && !activeWarehouse) {
     return (
       <div className="max-w-4xl mx-auto py-12 text-center">
         <AlertCircle className="w-16 h-16 text-amber-500 mx-auto mb-4" />
@@ -377,7 +385,7 @@ export const OrderCreate = () => {
           </h2>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">Booking Number *</label>
+              <label className="block text-sm font-medium text-slate-700 mb-2">{isCnRoute ? '预约单号 *' : 'Booking Number *'}</label>
               <input
                 type="text"
                 value={bookingNumber}
@@ -388,7 +396,7 @@ export const OrderCreate = () => {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">Customer Reference</label>
+              <label className="block text-sm font-medium text-slate-700 mb-2">{isCnRoute ? '客户参考号' : 'Customer Reference'}</label>
               <input
                 type="text"
                 value={refNumber}
@@ -399,7 +407,7 @@ export const OrderCreate = () => {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">Customer Name *</label>
+              <label className="block text-sm font-medium text-slate-700 mb-2">{isCnRoute ? '客户姓名 *' : 'Customer Name *'}</label>
               <input
                 type="text"
                 required
@@ -410,7 +418,7 @@ export const OrderCreate = () => {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">Customer ID</label>
+              <label className="block text-sm font-medium text-slate-700 mb-2">{isCnRoute ? '客户编号' : 'Customer ID'}</label>
               <input
                 type="text"
                 value={customerId}
@@ -420,7 +428,7 @@ export const OrderCreate = () => {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">Customer Email</label>
+              <label className="block text-sm font-medium text-slate-700 mb-2">{isCnRoute ? '客户邮箱' : 'Customer Email'}</label>
               <input
                 type="email"
                 value={customerEmail}
@@ -430,7 +438,7 @@ export const OrderCreate = () => {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">Store</label>
+              <label className="block text-sm font-medium text-slate-700 mb-2">{isCnRoute ? '门店' : 'Store'}</label>
               <select
                 value={storeId}
                 onChange={(e) => setStoreId(e.target.value)}
@@ -443,7 +451,7 @@ export const OrderCreate = () => {
               </select>
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">Scheduled Pickup Date</label>
+              <label className="block text-sm font-medium text-slate-700 mb-2">{isCnRoute ? '预约提货日期' : 'Scheduled Pickup Date'}</label>
               <input
                 type="date"
                 value={pickupDateScheduled}
@@ -641,7 +649,7 @@ export const OrderCreate = () => {
           </h2>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">Payment Status</label>
+              <label className="block text-sm font-medium text-slate-700 mb-2">{isCnRoute ? '付款状态' : 'Payment Status'}</label>
               <div className="flex gap-4">
                 <button
                   type="button"
@@ -669,7 +677,7 @@ export const OrderCreate = () => {
             </div>
             {paymentStatus === 'Paid' && (
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-2">Payment Method</label>
+                <label className="block text-sm font-medium text-slate-700 mb-2">{isCnRoute ? '付款方式' : 'Payment Method'}</label>
                 <select
                   value={paymentMethod}
                   onChange={(e) => setPaymentMethod(e.target.value)}
@@ -685,7 +693,7 @@ export const OrderCreate = () => {
           </div>
         </section>
 
-        {/* Notifications Section */}
+        {!isCnRoute && (
         <section className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm space-y-6">
           <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
             <span className="w-8 h-8 bg-indigo-100 text-indigo-600 rounded-lg flex items-center justify-center text-sm">4</span>
@@ -768,6 +776,8 @@ export const OrderCreate = () => {
             )}
           </div>
         </section>
+
+        )}
 
         <div className="flex justify-end gap-4">
           <button

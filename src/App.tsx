@@ -160,16 +160,16 @@ export default function App() {
             <Routes>
               <Route path="/login" element={CN_API_ONLY ? <Navigate to="/cn/login" replace /> : <Login />} />
               <Route path="/select-warehouse" element={<WarehouseSelection />} />
-              <Route path="/guest-display" element={<GuestDisplay />} />
+              <Route path="/guest-display" element={CN_API_ONLY ? <Navigate to="/cn" replace /> : <GuestDisplay />} />
               <Route path="/" element={CN_API_ONLY ? <Navigate to="/cn" /> : <ProtectedRoute><Dashboard /></ProtectedRoute>} />
               <Route path="/orders" element={<ProtectedRoute><Orders /></ProtectedRoute>} />
               <Route path="/orders/create" element={<ProtectedRoute><OrderCreate /></ProtectedRoute>} />
               <Route path="/orders/bulk-import" element={<ProtectedRoute><BulkOrderUpload /></ProtectedRoute>} />
               <Route path="/orders/:id" element={<ProtectedRoute><OrderDetail /></ProtectedRoute>} />
               <Route path="/overdue" element={<ProtectedRoute><OverdueOrders /></ProtectedRoute>} />
-              <Route path="/picking-queue" element={<ProtectedRoute><PickingQueue /></ProtectedRoute>} />
+              <Route path="/picking-queue" element={CN_API_ONLY ? <Navigate to="/cn" replace /> : <ProtectedRoute><PickingQueue /></ProtectedRoute>} />
               <Route path="/counter-pickups" element={<ProtectedRoute><CounterPickupListing /></ProtectedRoute>} />
-              <Route path="/putback-tasks" element={<ProtectedRoute><PutbackTasks /></ProtectedRoute>} />
+              <Route path="/putback-tasks" element={CN_API_ONLY ? <Navigate to="/cn" replace /> : <ProtectedRoute><PutbackTasks /></ProtectedRoute>} />
               <Route path="/field-visits" element={CN_API_ONLY ? <Navigate to="/cn" /> : <ProtectedRoute><FieldVisits /></ProtectedRoute>} />
               <Route path="/field-visit-reports" element={CN_API_ONLY ? <Navigate to="/cn" /> : <ProtectedRoute><FieldVisitReports /></ProtectedRoute>} />
               <Route path="/skus" element={<ProtectedRoute><SKUDatabase /></ProtectedRoute>} />
@@ -190,6 +190,8 @@ export default function App() {
               <Route path="/cn/orders/:id" element={<ProtectedCnRoute><OrderDetail /></ProtectedCnRoute>} />
               <Route path="/cn/overdue" element={<ProtectedCnRoute><OverdueOrders /></ProtectedCnRoute>} />
               <Route path="/cn/counter-pickups" element={<ProtectedCnRoute><CounterPickupListing /></ProtectedCnRoute>} />
+              <Route path="/cn/groups" element={<ProtectedCnRoute><UserGroups /></ProtectedCnRoute>} />
+              <Route path="/cn/stores" element={<ProtectedCnRoute><StoreManagement /></ProtectedCnRoute>} />
               <Route path="/cn/users" element={<ProtectedCnRoute><UserManagement /></ProtectedCnRoute>} />
               </>}
               <Route path="*" element={<Navigate to={CN_API_ONLY ? "/cn" : "/"} />} />

@@ -952,7 +952,7 @@ async function startServer() {
         return res.status(403).json({ success: false, error: "Forbidden: Access denied to this warehouse" });
       }
 
-      return res.json({ success: true, order });
+      return res.json({ success: true, order, orderVersion: orderDoc.updateTime?.valueOf() });
     } catch (error: any) {
       console.error("Order Detail Error:", error);
       return res.status(500).json({ success: false, error: error.message });
@@ -960,13 +960,20 @@ async function startServer() {
   });
 
   // Stores list endpoint
-  app.get("/api/stores/list", authenticate, async (_req: any, res) => {
+  app.get("/api/stores/list", authenticate, async (req: any, res) => {
     const currentDb = await initDb();
     if (!currentDb) return res.status(503).json({ success: false, error: "Database not initialized" });
 
     try {
       const snap = await currentDb.collection("stores").get();
-      const stores = snap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+      const management = req.query.management === "1";
+      if (management && req.user.role !== "Admin" && !hasPermission(req.user, "Manage Stores")) {
+        return res.status(403).json({ success: false, error: "没有管理门店的权限。" });
+      }
+      const stores = snap.docs.map(doc => {
+        const { storeId, name, autoSend, senderEmail, template, disableEmail } = doc.data();
+        return { id: doc.id, storeId: storeId || doc.id, name, autoSend, ...(management ? { senderEmail, template, disableEmail } : {}) };
+      });
       return res.json({ success: true, stores });
     } catch (error: any) {
       console.error("Stores List Error:", error);
@@ -1854,7 +1861,7 @@ async function startServer() {
       if (!data || data.status !== "Finalized") return res.status(404).json({ success: false, error: "Archived pickup not found." });
       const allowed: string[] = req.user.allowedWarehouses || [];
       const isSuper = SUPER_ADMINS.includes((req.user.username || "").toLowerCase());
-      if (isCnPortalRequest(req) || (!isSuper && !allowed.includes("*") && !allowed.includes(data.warehouseId))) {
+      if ((isCnPortalRequest(req) && !["AKL", "CHC"].includes(data.warehouseId)) || (!isSuper && !allowed.includes("*") && !allowed.includes(data.warehouseId))) {
         return res.status(403).json({ success: false, error: "You do not have access to this record." });
       }
       const snapshot = await ref.collection("archive_edits").orderBy("revision", "desc").get();
@@ -1866,7 +1873,7 @@ async function startServer() {
   });
 
   app.patch("/api/counter-pickups/:id/archive", authenticate, async (req: any, res) => {
-    if (isCnPortalRequest(req) || !isFrontDeskRole(req.user)) {
+    if (!isFrontDeskRole(req.user)) {
       return res.status(403).json({ success: false, error: "Reception access required." });
     }
     const { itemIndex, revision, outcome, orderNumber, comment, requestType, sourceType } = req.body ?? {};
@@ -1891,7 +1898,7 @@ async function startServer() {
         const requestedWh = req.headers["x-warehouse-id"];
         const allowed: string[] = req.user.allowedWarehouses || [];
         const isSuper = SUPER_ADMINS.includes((req.user.username || "").toLowerCase());
-        if ((requestedWh && requestedWh !== data.warehouseId) ||
+        if ((isCnPortalRequest(req) && !["AKL", "CHC"].includes(data.warehouseId)) || (requestedWh && requestedWh !== data.warehouseId) ||
             (!isSuper && !allowed.includes("*") && !allowed.includes(data.warehouseId))) {
           return { status: 403, error: "You do not have access to this warehouse." };
         }
@@ -2263,6 +2270,9 @@ async function startServer() {
 
   // Create Order Endpoint
   app.post("/api/orders/create", authenticate, async (req: any, res) => {
+    if (!hasPermission(req.user, "Create Order")) {
+      return res.status(403).json({ success: false, error: "Forbidden: Create Order permission required." });
+    }
     console.log("🚀 [API Request]: POST /api/orders/create");
     const currentDb = await initDb();
     if (!currentDb) {
@@ -2441,6 +2451,86 @@ async function startServer() {
   });
 
   // Update Order Endpoint
+  app.patch("/api/cn/orders/:id", authenticate, async (req: any, res) => {
+    const { action, changes, orderVersion } = req.body ?? {};
+    const permitted = (name: string) => hasPermission(req.user, name);
+    const canWrite = action === "edit" ? permitted("Edit Order")
+      : action === "payment" ? permitted("Add Payment") || permitted("Edit Payment")
+      : action === "cancel" && permitted("Cancel Orders");
+    if (!canWrite) return res.status(403).json({ success: false, error: "没有执行此操作的权限。" });
+    const currentDb = await initDb();
+    if (!currentDb) return res.status(503).json({ success: false, error: "数据库暂不可用。" });
+    const orderRef = currentDb.collection("orders").doc(req.params.id);
+    const timestamp = new Date().toISOString();
+    const operator = req.user.name || req.user.username;
+    try {
+      const result = await currentDb.runTransaction(async tx => {
+        const snapshot = await tx.get(orderRef);
+        const order = snapshot.data();
+        if (!order) return { status: 404, error: "未找到订单。" };
+        if (!orderVersion || snapshot.updateTime?.valueOf() !== orderVersion) {
+          return { status: 409, error: "订单已被更新，请刷新后重试。" };
+        }
+        const allowed = req.user.allowedWarehouses || [];
+        if (order.warehouseId && (!["AKL", "CHC"].includes(order.warehouseId) ||
+            (!isSuperAdmin(req.user.username) && !allowed.includes("*") && !allowed.includes(order.warehouseId)))) {
+          return { status: 403, error: "没有此仓库的操作权限。" };
+        }
+        if (order.status !== "Created" || order.pickupExceptionStatus ||
+            (action !== "payment" && order.warehouseStatus)) {
+          return { status: 409, error: "订单状态已变更或已开始仓库处理，请刷新后查看。" };
+        }
+        const update: Record<string, unknown> = {};
+        if (action === "edit") {
+          if (!changes || typeof changes.customerName !== "string" || !changes.customerName.trim() ||
+              !Array.isArray(changes.items) || !changes.items.length) {
+            return { status: 400, error: "请填写客户姓名并添加商品。" };
+          }
+          if (changes.items.some((item: any) => !item || typeof item.sku !== "string" || !item.sku.trim() ||
+              !Number.isSafeInteger(item.qty) || item.qty < 1 || !Number.isFinite(item.unit_price) || item.unit_price < 0)) {
+            return { status: 400, error: "请检查商品 SKU、数量和单价。" };
+          }
+          const items = changes.items.map((item: any) => ({
+            sku: item.sku.trim(), productName: String(item.productName ?? ""), location: String(item.location ?? ""),
+            qty: item.qty, unit_price: item.unit_price
+          }));
+          for (const field of ["customerName", "customerEmail", "storeId", "pickupDateScheduled", "notes"]) {
+            if (typeof changes[field] === "string") update[field] = changes[field].trim();
+          }
+          if (changes.pickupDateScheduled === null) update.pickupDateScheduled = null;
+          update.items = items;
+          update.totalAmount = items.reduce((sum: number, item: { qty: number; unit_price: number }) => sum + item.qty * item.unit_price, 0);
+        } else if (action === "payment") {
+          const status = changes?.paymentStatus;
+          if (status !== "Paid" && status !== "Unpaid") return { status: 400, error: "无效的付款状态。" };
+          if (order.paymentStatus === "Paid" && !permitted("Edit Payment")) return { status: 403, error: "没有修改已付款订单的权限。" };
+          if (status === "Paid" && (typeof changes.paymentMethod !== "string" || !changes.paymentMethod.trim())) {
+            return { status: 400, error: "请选择付款方式。" };
+          }
+          update.paymentStatus = status;
+          update.paymentMethod = status === "Paid" ? changes.paymentMethod.trim() : null;
+          update.paymentTime = status === "Paid" ? order.paymentTime || timestamp : null;
+          update.paymentBy = status === "Paid" ? order.paymentBy || operator : null;
+        } else {
+          if (order.paymentStatus === "Paid") return { status: 409, error: "已付款订单不能直接取消。" };
+          update.status = "Cancelled";
+          update.statusUpdatedAt = timestamp;
+        }
+        tx.update(orderRef, { ...update, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+        const labels: Record<string, string> = { edit: "Order Updated", payment: "Payment Updated", cancel: "Order Cancelled" };
+        tx.create(currentDb.collection("logs").doc(), {
+          timestamp, userId: req.user.uid, userName: operator, orderId: orderRef.id, action: labels[action],
+          details: Object.keys(update).join(", "), category: "Order"
+        });
+        return { status: 200 };
+      });
+      return res.status(result.status).json(result.error ? { success: false, error: result.error } : { success: true });
+    } catch (error) {
+      console.error("CN order change failed:", error);
+      return res.status(500).json({ success: false, error: "保存订单失败，请重试。" });
+    }
+  });
+
   app.post("/api/orders/update", authenticate, async (req: any, res) => {
     const currentDb = await initDb();
     if (!currentDb) {
@@ -3168,7 +3258,36 @@ async function startServer() {
   });
 
   // Bulk Order Creation
+  app.post("/api/orders/import-check", authenticate, async (req: any, res) => {
+    if (!hasPermission(req.user, "Create Order")) return res.status(403).json({ success: false, error: "没有创建订单的权限。" });
+    const { skus = [], bookingNumbers = [], refs = [] } = req.body ?? {};
+    if ([skus, bookingNumbers, refs].some(values => !Array.isArray(values) || values.length > 30 ||
+        values.some((value: unknown) => typeof value !== "string" || !value || value.length > 200))) {
+      return res.status(400).json({ success: false, error: "校验数据无效。" });
+    }
+    try {
+      const db = await initDb();
+      if (!db) return res.status(503).json({ success: false, error: "数据库暂不可用。" });
+      const find = (collection: string, field: string, values: string[]) =>
+        values.length ? db.collection(collection).where(field, "in", [...new Set(values)]).get().then(snap => snap.docs.map(doc => doc.data())) : Promise.resolve([]);
+      const [skuRows, bookingRows, refRows] = await Promise.all([
+        find("skus", "sku", skus), find("orders", "bookingNumber", bookingNumbers), find("orders", "refNumber", refs)
+      ]);
+      return res.json({
+        success: true,
+        skus: skuRows.map(({ sku, productName, location, locations }) => ({ sku, productName, location, locations })),
+        bookingNumbers: bookingRows.map(order => order.bookingNumber),
+        refs: refRows.map(order => order.refNumber)
+      });
+    } catch (error) {
+      console.error("Import preflight failed:", error);
+      return res.status(500).json({ success: false, error: "导入校验失败，请重试。" });
+    }
+  });
+
   app.post("/api/orders/bulk-create", authenticate, async (req: any, res) => {
+    if (!hasPermission(req.user, "Create Order")) return res.status(403).json({ error: "Forbidden: Create Order permission required." });
+
     const currentDb = await initDb();
     if (!currentDb) {
       return res.status(503).json({ success: false, error: "Database not initialized" });
@@ -3199,9 +3318,20 @@ async function startServer() {
               
               if (!bookingNumber) throw new Error("Booking Number is missing in one of the orders");
               if (!refNumber) throw new Error("Customer Ref is missing in one of the orders");
+              const warehouseInput = orderData.warehouse_id ?? orderData.warehouseId;
+              if (warehouseInput != null && typeof warehouseInput !== "string") throw new Error("Invalid warehouse.");
+              const warehouse = warehouseInput?.trim().toUpperCase() || null;
+              if (warehouse && !["AKL", "CHC"].includes(warehouse)) throw new Error("Warehouse must be AKL or CHC.");
+              if (warehouse && isCnPortalRequest(req)) {
+                const allowed = req.user.allowedWarehouses || [];
+                if (!isSuperAdmin(req.user.username) && !allowed.includes("*") && !allowed.includes(warehouse)) {
+                  throw new Error("没有导入至该仓库的权限。");
+                }
+              }
 
               return {
                 orderData,
+                warehouse,
                 bookingNumber,
                 refNumber,
                 bKeyRef: currentDb.collection("unique_keys").doc(`bn_${bookingNumber}`),
@@ -3211,12 +3341,17 @@ async function startServer() {
             });
 
             // 1. All Reads First
+            if (new Set(preparedOrders.map(p => p.bookingNumber)).size !== preparedOrders.length ||
+                new Set(preparedOrders.map(p => p.refNumber)).size !== preparedOrders.length) {
+              throw new Error("Duplicate booking or customer reference in the import batch.");
+            }
+            const existingOrders = await Promise.all(preparedOrders.map(p => transaction.get(p.orderRef)));
             const bSnaps = await Promise.all(preparedOrders.map(p => transaction.get(p.bKeyRef)));
             const rSnaps = await Promise.all(preparedOrders.map(p => transaction.get(p.rKeyRef)));
 
             // 2. Validation and Writes
             preparedOrders.forEach((p, index) => {
-              if (bSnaps[index].exists) throw new Error(`Booking Number ${p.bookingNumber} already exists`);
+              if (bSnaps[index].exists || existingOrders[index].exists) throw new Error(`Booking Number ${p.bookingNumber} already exists`);
               if (rSnaps[index].exists) throw new Error(`Customer Ref ${p.refNumber} already exists`);
 
               const raw = p.orderData;
@@ -3228,7 +3363,7 @@ async function startServer() {
                 customerEmail: raw.customer_email || raw.customerEmail || '',
                 storeId: raw.store_id || raw.storeId || '',
                 pickupDateScheduled: raw.scheduled_pickup_date || raw.pickupDateScheduled || '',
-                warehouseId: raw.warehouse_id || raw.warehouseId || '',
+                warehouseId: p.warehouse,
                 paymentStatus: raw.payment_state || raw.paymentStatus || 'Unpaid',
                 paymentMethod: raw.payment_method || raw.paymentMethod || null,
                 orderNote: raw.order_note || raw.orderNote || '',
@@ -3316,6 +3451,28 @@ async function startServer() {
   });
 
   // User Groups
+  app.get("/api/user-groups/list", authenticate, async (req: any, res) => {
+    if (req.user.role !== "Admin" && !hasPermission(req.user, "Manage User Groups")) {
+      return res.status(403).json({ success: false, error: "没有管理用户组的权限。" });
+    }
+    try {
+      const db = await initDb();
+      if (!db) return res.status(503).json({ success: false, error: "数据库暂不可用。" });
+      const [groups, users] = await Promise.all([db.collection("userGroups").get(), db.collection("users").get()]);
+      return res.json({
+        success: true,
+        groups: groups.docs.map(doc => ({ ...doc.data(), id: doc.id })),
+        users: users.docs.flatMap(doc => {
+          const { uid, username, name } = doc.data();
+          return typeof username !== "string" || isSuperAdmin(username) ? [] : [{ uid: uid || doc.id, username, name }];
+        })
+      });
+    } catch (error) {
+      console.error("Could not list groups:", error);
+      return res.status(500).json({ success: false, error: "无法加载用户组。" });
+    }
+  });
+
   app.post("/api/user-groups/save", authenticate, async (req: any, res) => {
     const currentDb = await initDb();
     if (!currentDb) {

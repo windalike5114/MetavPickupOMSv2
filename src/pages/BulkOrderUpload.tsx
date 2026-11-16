@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { useDropzone } from 'react-dropzone';
 import Papa from 'papaparse';
+import * as XLSX from 'xlsx';
 import { z } from 'zod';
 import { 
   collection, 
@@ -34,7 +35,7 @@ import {
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { Order, OrderItem, OrderStatus, PaymentStatus, PaymentMethod, SKU } from '../types';
-import { cn } from '../utils';
+import { cn, hasPermission } from '../utils';
 import { API_BASE_URL } from '../constants';
 
 // 1. Zod Schema for Validation
@@ -64,8 +65,8 @@ const orderRowSchema = z.object({
   'unit_price': z.string().transform(val => parseFloat(val)).refine(val => !isNaN(val) && val >= 0, {
     message: "Unit price must be a non-negative number"
   }),
-  'warehouse_id': z.string().refine(val => ['AKL', 'CHC'].includes(val.toUpperCase()), {
-    message: "Warehouse must be AKL or CHC"
+  'warehouse_id': z.string().optional().transform(val => val?.trim().toUpperCase() || '').refine(val => !val || ['AKL', 'CHC'].includes(val), {
+    message: "Warehouse must be blank, AKL, or CHC"
   }),
   'order_note': z.string().optional()
 }).refine(data => {
@@ -105,10 +106,11 @@ interface ProcessedRow {
 import { PageHeader } from '../components/PageHeader';
 
 export const BulkOrderUpload = () => {
-  const { profile } = useAuth();
+  const { profile, token } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
   const isCnRoute = location.pathname.startsWith('/cn');
+  const canCreate = hasPermission(profile, 'Create Order', profile?.username || profile?.email);
   const ordersBasePath = location.pathname.startsWith('/cn') ? '/cn/orders' : '/orders';
   const [rows, setRows] = useState<ProcessedRow[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -130,7 +132,7 @@ export const BulkOrderUpload = () => {
     duplicates: '重复数据',
     invalidRows: '无效数据',
     successImported: '成功导入',
-    dragDrop: '拖拽 CSV 文件到此处',
+    dragDrop: '拖拽 Excel 或 CSV 文件到此处',
     browse: '或点击选择文件',
     importRules: '导入规则',
     fixedFields: '固定字段：',
@@ -139,11 +141,11 @@ export const BulkOrderUpload = () => {
     paymentMethodRule: 'payment_method：',
     paymentPaidRule: '若为 Paid：Cash、EFTPOS、Bank Transfer、Online Payment',
     paymentUnpaidRule: '若为 Unpaid：可留空，系统默认 Pending',
-    warehouseRule: 'warehouse_id：仅支持 AKL、CHC',
+    warehouseRule: 'warehouse_id 可留空（未分配），或填写 AKL、CHC',
     note: '说明：CSV 导入时大小写不敏感，系统会自动标准化。',
     dataPreview: '数据预览',
     checkingDuplicates: '正在检查重复数据...',
-    noData: '尚未加载数据，请先上传 CSV 文件。',
+    noData: '尚未加载数据，请先上传 Excel 或 CSV 文件。',
     booking: '预订号',
     customer: '客户',
     ref: '参考号',
@@ -195,7 +197,7 @@ export const BulkOrderUpload = () => {
     paymentMethodRule: 'payment_method:',
     paymentPaidRule: 'If Paid: Cash, EFTPOS, Bank Transfer, Online Payment',
     paymentUnpaidRule: 'If Unpaid: Can be empty (defaults to "Pending")',
-    warehouseRule: 'warehouse_id: AKL, CHC',
+    warehouseRule: 'warehouse_id: optional (blank, AKL, or CHC)',
     note: 'Note: Values are case-insensitive during CSV import but will be normalized.',
     dataPreview: 'Data Preview',
     checkingDuplicates: 'Checking duplicates...',
@@ -265,8 +267,17 @@ export const BulkOrderUpload = () => {
   useEffect(() => {
     const fetchStores = async () => {
       try {
-        const querySnapshot = await getDocs(collection(db, 'stores'));
-        const ids = querySnapshot.docs.map(doc => doc.id);
+        let ids: string[];
+        if (isCnRoute) {
+          if (!token || !canCreate) return;
+          const response = await fetch('/api/stores/list', { headers: { 'x-v2-auth-token': token } });
+          const result = await response.json();
+          if (!response.ok || !result.success) throw new Error(text.failedStores);
+          ids = result.stores.flatMap((store: { id: string; storeId: string }) => [store.id, store.storeId]);
+        } else {
+          const snapshot = await getDocs(collection(db, 'stores'));
+          ids = snapshot.docs.map(doc => doc.id);
+        }
         setAvailableStoreIds(ids);
         addLog(isCnRoute ? `${text.loadedStores} ${ids.length} ${text.loadedStoresSuffix}` : `${text.loadedStores} ${ids.length} ${text.loadedStoresSuffix}`, 'info');
       } catch (err) {
@@ -276,7 +287,7 @@ export const BulkOrderUpload = () => {
     };
 
     fetchStores();
-  }, [addLog]);
+  }, [addLog, isCnRoute, token, canCreate]);
 
   const downloadTemplate = () => {
     const headers = [
@@ -303,14 +314,14 @@ export const BulkOrderUpload = () => {
       '# -> store_id: Must match existing Store ID in system (e.g., WMS-MAIN).',
       '# -> payment_state: Must be "Paid" or "Unpaid".',
       '# -> payment_method: If Paid, must be one of: Cash, EFTPOS, Bank Transfer, Online Payment. If Unpaid, can be empty.',
-      '# -> warehouse_id: Must be "AKL" or "CHC".',
+      '# -> warehouse_id: Optional. Leave blank for Unassigned or enter "AKL" or "CHC".',
       '# [AMBER AREA] Product Info: sku, quantity, unit_price',
       '# -> RULE: These MUST be filled on EVERY row for product details.',
       '# ============================='
     ];
     
     const sampleData = [
-      ['BK-2026-001', 'John Doe', 'john@example.com', 'REF-9988', 'CUST-102', '2026-03-25', 'WMS-MAIN', 'Paid', 'EFTPOS', 'Handle with care', 'AKL', 'WPKIT-TA005', '2', '45.50'],
+      ['BK-2026-001', 'John Doe', 'john@example.com', 'REF-9988', 'CUST-102', '2026-03-25', 'WMS-MAIN', 'Paid', 'EFTPOS', 'Handle with care', '', 'WPKIT-TA005', '2', '45.50'],
       ['BK-2026-001', '', '', '', '', '', '', '', '', '', '', 'SKU-B', '1', '50.00'],
       ['BK-2026-002', 'Jane Smith', 'jane@example.com', 'REF-1001', 'CUST-103', '2026-03-26', 'WMS-MAIN', 'Unpaid', 'Bank Transfer', '', 'AKL', 'SKU-C', '1', '299.99']
     ];
@@ -328,13 +339,37 @@ export const BulkOrderUpload = () => {
     addLog(text.templateDownloaded, 'info');
   };
 
-  const onDrop = useCallback((acceptedFiles: File[]) => {
+  const checkImport = async (payload: { skus?: string[]; bookingNumbers?: string[]; refs?: string[] }) => {
+    const response = await fetch('/api/orders/import-check', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-v2-auth-token': token || '' },
+      body: JSON.stringify(payload)
+    });
+    const result = await response.json();
+    if (!response.ok || !result.success) throw new Error(result.error || '导入校验失败。');
+    return result;
+  };
+
+  const onDrop = useCallback(async (acceptedFiles: File[]) => {
     const file = acceptedFiles[0];
-    if (!file) return;
+    if (!file || (isCnRoute && (!canCreate || !token))) return;
 
     addLog(isCnRoute ? `${text.fileSelected}：${file.name}` : `${text.fileSelected}: ${file.name}`, 'info');
     
-    Papa.parse(file, {
+    let input: string;
+    try {
+      if (/\.xlsx$/i.test(file.name)) {
+        const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array', dateNF: 'yyyy-mm-dd' });
+        input = XLSX.utils.sheet_to_csv(workbook.Sheets[workbook.SheetNames[0]]);
+      } else {
+        input = await file.text();
+      }
+    } catch {
+      addLog(isCnRoute ? '无法读取导入文件。' : 'Could not read the import file.', 'error');
+      return;
+    }
+
+    Papa.parse<Record<string, string>>(input, {
       header: true,
       skipEmptyLines: true,
       comments: "#",
@@ -357,6 +392,11 @@ export const BulkOrderUpload = () => {
         for (let i = 0; i < uniqueSkusInCsv.length; i += SKU_CHUNK_SIZE) {
           const chunk = uniqueSkusInCsv.slice(i, i + SKU_CHUNK_SIZE);
           try {
+            if (isCnRoute) {
+              const result = await checkImport({ skus: chunk });
+              (result.skus as SKU[]).forEach(sku => fetchedSkusMap.set(sku.sku.toUpperCase(), sku));
+              continue;
+            }
             const q = query(collection(db, 'skus'), where('sku', 'in', chunk));
             const snap = await getDocs(q);
             snap.docs.forEach(doc => {
@@ -365,6 +405,7 @@ export const BulkOrderUpload = () => {
             });
           } catch (err) {
             console.error("Error fetching SKU chunk:", err);
+            if (isCnRoute) { setRows([]); addLog("SKU 校验失败，请重新导入。", "error"); return; }
           }
         }
         
@@ -420,7 +461,8 @@ export const BulkOrderUpload = () => {
           const matchedSku = fetchedSkusMap.get(skuCode);
           if (matchedSku) {
             enrichedRow.productName = matchedSku.productName;
-            enrichedRow.location = matchedSku.location;
+            const warehouse = enrichedRow.warehouse_id?.trim().toUpperCase();
+            enrichedRow.location = warehouse ? (matchedSku.locations?.[warehouse] || matchedSku.location) : '';
           }
 
           return {
@@ -434,17 +476,20 @@ export const BulkOrderUpload = () => {
         });
 
         setRows(processed);
-        checkDuplicates(processed);
+        void checkDuplicates(processed).catch(error => {
+          setRows([]); setIsChecking(false); setProgress(0);
+          addLog(error.message || "导入校验失败。", "error");
+        });
       },
       error: (err) => {
         addLog(`CSV Parsing Error: ${err.message}`, 'error');
       }
     });
-  }, [addLog, availableStoreIds]);
+  }, [addLog, availableStoreIds, isCnRoute, token, canCreate]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
-    accept: { 'text/csv': ['.csv'] },
+    accept: isCnRoute ? { 'text/csv': ['.csv'], 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] } : { 'text/csv': ['.csv'] },
     multiple: false
   });
 
@@ -464,6 +509,15 @@ export const BulkOrderUpload = () => {
       const bnChunk = bookingNumbers.slice(i, i + CHUNK_SIZE);
       const refChunk = customerRefs.slice(i, i + CHUNK_SIZE);
 
+      if (isCnRoute) {
+        const result = await checkImport({
+          bookingNumbers: bnChunk.map(value => value.trim().toUpperCase()),
+          refs: refChunk.map(value => value.trim().toUpperCase())
+        });
+        result.bookingNumbers.forEach((value: string) => duplicates.add('bn_' + value));
+        result.refs.forEach((value: string) => duplicates.add('ref_' + value));
+        continue;
+      }
       const bnQuery = query(collection(db, 'orders'), where('bookingNumber', 'in', bnChunk));
       const refQuery = query(collection(db, 'orders'), where('refNumber', 'in', refChunk));
 
@@ -476,8 +530,8 @@ export const BulkOrderUpload = () => {
     }
 
     setRows(prev => prev.map(row => {
-      const isBnDup = duplicates.has(`bn_${row.data['booking_number']}`);
-      const isRefDup = duplicates.has(`ref_${row.data['customer_ref']}`);
+      const isBnDup = duplicates.has(`bn_${row.data['booking_number'].trim().toUpperCase()}`);
+      const isRefDup = duplicates.has(`ref_${row.data['customer_ref'].trim().toUpperCase()}`);
       const isDuplicate = isBnDup || isRefDup;
       
       return {
@@ -504,7 +558,7 @@ export const BulkOrderUpload = () => {
     setProgress(0);
 
     try {
-      const token = localStorage.getItem('x-v2-auth-token');
+      if (!token || !canCreate) throw new Error('Create Order permission required.');
       
       // Group rows by booking_number to handle multi-line orders
       const groupedOrdersMap = new Map<string, any>();
@@ -524,7 +578,7 @@ export const BulkOrderUpload = () => {
             customer_email: data['customer_email'] || '',
             store_id: (data['store_id'] || '').toString().toUpperCase().replace(/\s+/g, '_'),
             scheduled_pickup_date: data['scheduled_pickup_date'] || '',
-            warehouse_id: (data['warehouse_id'] || '').toString().toUpperCase(),
+            warehouse_id: (data['warehouse_id'] || '').toString().trim().toUpperCase(),
             payment_state: (data['payment_state'] || '').toString().toLowerCase() === 'paid' ? 'Paid' : 'Unpaid',
             payment_method: data.payment_method || (data['payment_state']?.toLowerCase() === 'unpaid' ? 'Pending' : null),
             order_note: data.order_note || '',
@@ -559,7 +613,7 @@ export const BulkOrderUpload = () => {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'Authorization': `Bearer ${token}`
+              'x-v2-auth-token': `Bearer ${token}`
             },
             body: JSON.stringify({ orders: payload })
           });
@@ -706,6 +760,8 @@ export const BulkOrderUpload = () => {
       default: return rows;
     }
   }, [rows, activeTab]);
+
+  if (isCnRoute && !canCreate) return <p role="alert" className="p-6">此账号没有创建订单权限。</p>;
 
   return (
     <div className="flex flex-col h-full w-full bg-slate-50 overflow-hidden">
