@@ -1022,7 +1022,7 @@ async function startServer() {
     }
   });
 
-  // SKU search endpoint (for edit item search in CN API-only mode)
+  // SKU and reference search for order and counter pickup forms
   app.get("/api/skus/search", authenticate, async (req: any, res) => {
     const currentDb = await initDb();
     if (!currentDb) return res.status(503).json({ success: false, error: "Database not initialized" });
@@ -1033,23 +1033,92 @@ async function startServer() {
       if (term.length < 2) return res.json({ success: true, skus: [] });
 
       const requestedWh = (req.headers["x-warehouse-id"] as string) || "";
-      const snap = await currentDb.collection("skus")
-        .where("sku", ">=", term)
-        .where("sku", "<=", term + "\uf8ff")
-        .limit(limitValue)
-        .get();
-      const skus = snap.docs.map((d: any) => {
-        const data = d.data();
-        return {
-          id: d.id,
-          ...data,
-          location: resolveSkuLocationForWarehouse(data, requestedWh)
-        };
+      const skuCollection = currentDb.collection("skus");
+      const fields = ["sku", "ref1", "ref2"];
+      const snapshots = await Promise.all(fields.map(field =>
+        skuCollection.where(field, ">=", term).where(field, "<=", term + "\uf8ff").limit(limitValue).get()
+      ));
+      const matches = new Map<string, { rank: number; sku: any }>();
+      snapshots.forEach((snapshot, index) => {
+        for (const doc of snapshot.docs) {
+          const data = doc.data();
+          const exact = data[fields[index]] === term;
+          const rank = exact ? (index === 0 ? 0 : 1) : (index === 0 ? 2 : 3);
+          const previous = matches.get(data.sku);
+          if (!previous || rank < previous.rank) {
+            matches.set(data.sku, {
+              rank, sku: { ...data, id: doc.id, location: resolveSkuLocationForWarehouse(data, requestedWh) }
+            });
+          }
+        }
       });
+      const skus = [...matches.values()].sort((a, b) => a.rank - b.rank || a.sku.sku.localeCompare(b.sku.sku))
+        .slice(0, limitValue).map(result => result.sku);
       return res.json({ success: true, skus });
     } catch (error: any) {
       console.error("SKU Search Error:", error);
       return res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.post("/api/skus/import-refs", authenticate, async (req: any, res) => {
+    if (!hasPermission(req.user, "Upload SKU")) {
+      return res.status(403).json({ success: false, error: "SKU upload permission required." });
+    }
+    const raw = req.body?.rows;
+    if (!Array.isArray(raw) || !raw.length || raw.length > 30 || raw.some(row =>
+      !row || typeof row.sku !== "string" || !row.sku.trim() || row.sku.length > 200 ||
+      [row.ref1, row.ref2].some(ref => ref !== undefined && (typeof ref !== "string" || ref.length > 250)) ||
+      (!row.ref1?.trim() && !row.ref2?.trim())
+    )) {
+      return res.status(400).json({ success: false, error: "Invalid SKU reference rows." });
+    }
+
+    const rows = raw.map(row => ({
+      sku: row.sku.trim().toUpperCase(),
+      ref1: row.ref1?.trim().toUpperCase(),
+      ref2: row.ref2?.trim().toUpperCase()
+    }));
+    if (new Set(rows.map(row => row.sku)).size !== rows.length) {
+      return res.status(400).json({ success: false, error: "Duplicate Code(Unique) in batch." });
+    }
+
+    const currentDb = await initDb();
+    if (!currentDb) return res.status(503).json({ success: false, error: "Database not initialized" });
+    try {
+      const result = await currentDb.runTransaction(async tx => {
+        const query = currentDb.collection("skus").where("sku", "in", rows.map(row => row.sku));
+        const snapshot = await tx.get(query);
+        const bySku = new Map<string, typeof snapshot.docs>();
+        for (const doc of snapshot.docs) {
+          const sku = doc.get("sku");
+          const docs = bySku.get(sku) || [];
+          docs.push(doc);
+          bySku.set(sku, docs);
+        }
+        const unmatched: string[] = [];
+        const ambiguous: string[] = [];
+        let updated = 0;
+        let unchanged = 0;
+        for (const row of rows) {
+          const matches = bySku.get(row.sku) || [];
+          if (matches.length === 0) { unmatched.push(row.sku); continue; }
+          if (matches.length > 1) { ambiguous.push(row.sku); continue; }
+          const [match] = matches;
+          const fields: Record<string, string> = {};
+          if (row.ref1 && match.get("ref1") !== row.ref1) fields.ref1 = row.ref1;
+          if (row.ref2 && match.get("ref2") !== row.ref2) fields.ref2 = row.ref2;
+          if (Object.keys(fields).length) {
+            tx.update(match.ref, fields);
+            updated++;
+          } else unchanged++;
+        }
+        return { updated, unchanged, unmatched, ambiguous };
+      });
+      return res.json({ success: true, ...result });
+    } catch (error) {
+      console.error("SKU reference import failed:", error);
+      return res.status(500).json({ success: false, error: "Failed to import SKU references." });
     }
   });
 

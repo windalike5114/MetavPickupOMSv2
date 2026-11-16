@@ -13,6 +13,8 @@ export type CounterPickupLegacyDestination = 'Returned' | 'Sold' | 'Other';
 export type CounterPickupFinalItemDestination = CounterPickupOutcome | CounterPickupLegacyDestination;
 
 export interface SKU {
+  ref1?: string;
+  ref2?: string;
   id?: string;
   sku: string;
   productName: string;

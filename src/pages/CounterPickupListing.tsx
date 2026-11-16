@@ -216,7 +216,7 @@ const CN_TEXT = {
   requestType: '请求类型',
   sourceType: '订单来源',
   skuLabel: 'SKU / 产品搜索',
-  skuPlaceholder: '搜索 SKU 或产品名称...',
+  skuPlaceholder: '搜索 SKU 或参考号...',
   skuHelp: '系统会自动带出产品名称和主库位。若为特殊 SKU，可手动补充产品信息。',
   qty: '数量',
   submit: '提交申请',
@@ -300,7 +300,7 @@ const EN_TEXT = {
   requestType: 'Request Type',
   sourceType: 'Order Source',
   skuLabel: 'SKU / Product Search',
-  skuPlaceholder: 'Search SKU or product name...',
+  skuPlaceholder: 'Search SKU or reference...',
   skuHelp: 'The system will auto-fill product name and primary location. If this is a special SKU, you can enter product details manually.',
   qty: 'Qty',
   submit: 'Submit',
@@ -1441,6 +1441,7 @@ export const CounterPickupListing: React.FC = () => {
                             <div>
                               <p className="font-bold text-slate-900">{result.sku}</p>
                               <p className="text-sm text-slate-500">{result.productName}</p>
+                              {(result.ref1 || result.ref2) && <p className="text-xs text-slate-600">{[result.ref1, result.ref2].filter(Boolean).join(" / ")}</p>}
                             </div>
                             <span className="px-2 py-1 rounded-lg bg-indigo-50 text-indigo-600 text-xs font-bold">
                               {result.location || 'NOT_ASSIGNED'}

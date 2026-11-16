@@ -171,43 +171,39 @@ export const OrderCreate = () => {
   }, [isCnRoute, canCreate]);
 
   useEffect(() => {
-    if (skuSearch.length >= 2) {
-      const fetchSKUs = async () => {
-        if (isCnRoute) {
-          if (!token) return;
-          const params = new URLSearchParams({ q: skuSearch, limit: '50' });
-          const response = await fetch(`${API_BASE_URL}/api/skus/search?${params.toString()}`, {
-            headers: {
-              'x-v2-auth-token': `Bearer ${token}`,
-              'x-warehouse-id': activeWarehouse || ''
-            }
-          });
-          const data = await response.json();
-          if (!data.success) throw new Error(data.error || 'Failed to search SKU');
-          setSkuResults((data.skus || []) as SKU[]);
-          setShowSkuResults(true);
-          return;
-        }
+    const term = skuSearch.trim();
+    setSkuResults([]);
+    setShowSkuResults(false);
+    if (term.length < 2 || !token) return;
 
-        const q = query(
-          collection(db, 'skus'),
-          where('sku', '>=', skuSearch.toUpperCase()),
-          where('sku', '<=', skuSearch.toUpperCase() + '\uf8ff')
-        );
-        const snap = await getDocs(q);
-        setSkuResults(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as SKU)));
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      try {
+        const params = new URLSearchParams({ q: term, limit: '50' });
+        const response = await fetch(API_BASE_URL + '/api/skus/search?' + params, {
+          headers: {
+            'x-v2-auth-token': 'Bearer ' + token,
+            'x-warehouse-id': activeWarehouse || ''
+          },
+          signal: controller.signal
+        });
+        const data = await response.json();
+        if (controller.signal.aborted) return;
+        if (!response.ok || !data.success) throw new Error(data.error || 'Failed to search SKU');
+        setSkuResults(data.skus);
         setShowSkuResults(true);
-      };
-      void fetchSKUs().catch(err => {
-        console.error("SKU search failed:", err);
-        setSkuResults([]);
-        setShowSkuResults(true);
-      });
-    } else {
-      setSkuResults([]);
-      setShowSkuResults(false);
-    }
-  }, [skuSearch, isCnRoute, token, activeWarehouse]);
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          console.error('SKU search failed:', error);
+          setShowSkuResults(true);
+        }
+      }
+    }, 250);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [skuSearch, token, activeWarehouse]);
 
   const addItem = (sku?: SKU) => {
     if (sku) {
@@ -487,7 +483,7 @@ export const OrderCreate = () => {
                   value={skuSearch}
                   onChange={(e) => setSkuSearch(e.target.value)}
                   className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none"
-                  placeholder={isCnRoute ? "搜索 SKU 或商品名称..." : "Search SKU or Product Name..."}
+                  placeholder={isCnRoute ? "搜索 SKU 或参考号..." : "Search SKU or reference..."}
                 />
               </div>
               
@@ -503,6 +499,7 @@ export const OrderCreate = () => {
                       <div>
                         <p className="font-bold text-slate-900">{sku.sku}</p>
                         <p className="text-sm text-slate-500">{sku.productName}</p>
+                        {(sku.ref1 || sku.ref2) && <p className="text-xs text-slate-600">{[sku.ref1, sku.ref2].filter(Boolean).join(" / ")}</p>}
                       </div>
                       <div className="text-right">
                         <span className="text-xs font-semibold bg-indigo-50 text-indigo-600 px-2 py-1 rounded">
