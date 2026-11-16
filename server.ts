@@ -677,7 +677,7 @@ async function startServer() {
         const updated = o?.updatedAt;
         let updatedMs = 0;
         if (updated && typeof updated === 'object' && typeof updated._seconds === 'number') {
-          updatedMs = updated._seconds * 1000;
+          updatedMs = updated._seconds * 1000 + Math.floor((updated._nanoseconds || 0) / 1000000);
         } else if (typeof updated === 'string') {
           const t = new Date(updated).getTime();
           updatedMs = Number.isFinite(t) ? t : 0;
@@ -772,7 +772,26 @@ async function startServer() {
         effectiveWarehouses = requestedWh ? [requestedWh] : effectiveWarehouses;
       }
       let orders: any[] = [];
-      if (isCnPortal && !warehouseId) {
+      if ((!isCnPortal || !warehouseId) && Number.isFinite(updatedAfterMs) && updatedAfterMs > 0) {
+        // Both ISO strings and Firestore timestamps are used for updatedAt.
+        const collection = currentDb.collection("orders");
+        const cursorIso = new Date(updatedAfterMs).toISOString();
+        const cursorTimestamp = admin.firestore.Timestamp.fromMillis(updatedAfterMs);
+        const [isoUpdates, timestampUpdates, newOrders] = await Promise.all([
+          collection.where("updatedAt", ">=", cursorIso).orderBy("updatedAt", "desc").limit(limitValue).get(),
+          collection.where("updatedAt", ">=", cursorTimestamp).where("updatedAt", "<=", admin.firestore.Timestamp.now()).orderBy("updatedAt", "desc").limit(limitValue).get(),
+          collection.where("createdTime", ">=", cursorIso).orderBy("createdTime", "desc").limit(limitValue).get()
+        ]);
+        const changed = [isoUpdates, timestampUpdates, newOrders]
+          .flatMap(snapshot => snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id })))
+          .filter((order: any) => {
+            if (!order.warehouseId) return true;
+            if (isCnPortal) return ["AKL", "CHC"].includes(order.warehouseId);
+            if (warehouseId) return order.warehouseId === warehouseId;
+            return !effectiveWarehouses || effectiveWarehouses.includes(order.warehouseId);
+          });
+        orders = mergeOrdersDedup(changed, []);
+      } else if (isCnPortal && !warehouseId) {
         const [warehouseOrders, unassignedOrders] = await Promise.all([
           fetchByWarehouseIn(["AKL", "CHC"]),
           fetchRecentUnassigned()

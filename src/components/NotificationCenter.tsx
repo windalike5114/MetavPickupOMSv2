@@ -1,10 +1,12 @@
+import type { QuerySnapshot, DocumentData } from 'firebase/firestore';
 import React, { useState, useEffect, useRef } from 'react';
-import { collection, query, where, orderBy, onSnapshot, doc, updateDoc, limit } from 'firebase/firestore';
+import { collection, query, where, orderBy, onSnapshot, getDocs, doc, updateDoc, limit } from 'firebase/firestore';
 import { db } from '../firebase';
 import { useAuth } from './AuthProvider';
 import { Bell, Check, X, ExternalLink, Clock } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useClickOutside } from '../hooks/useClickOutside';
+import { subscribeDuringWorkHours } from '../lib/workHours';
 import { formatDate } from '../utils';
 
 export const NotificationCenter: React.FC = () => {
@@ -36,6 +38,11 @@ export const NotificationCenter: React.FC = () => {
     let unsubscribe: (() => void) | null = null;
     let retryTimeout: NodeJS.Timeout | null = null;
 
+    const applySnapshot = (snap: QuerySnapshot<DocumentData>) => {
+      const allNotifications = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as any));
+      setNotifications(allNotifications);
+      setUnreadCount(allNotifications.filter((n: any) => !n.isRead).length);
+    };
     const setupListener = () => {
       // Clean up existing listener before retrying
       if (unsubscribe) {
@@ -45,11 +52,7 @@ export const NotificationCenter: React.FC = () => {
 
       unsubscribe = onSnapshot(q, (snap) => {
         retryCount = 0; // Reset on success
-        const allNotifications = snap.docs
-          .map(doc => ({ id: doc.id, ...doc.data() } as any));
-        
-        setNotifications(allNotifications);
-        setUnreadCount(allNotifications.filter((n: any) => !n.isRead).length);
+        applySnapshot(snap);
       }, (error) => {
         // Log the full error for debugging
         console.error("Notification listener error details:", {
@@ -71,12 +74,15 @@ export const NotificationCenter: React.FC = () => {
       });
     };
 
-    setupListener();
-
-    return () => {
-      if (unsubscribe) unsubscribe();
-      if (retryTimeout) clearTimeout(retryTimeout);
-    };
+    return subscribeDuringWorkHours('nz', () => {
+      retryCount = 0;
+      setupListener();
+      return () => {
+        unsubscribe?.();
+        unsubscribe = null;
+        if (retryTimeout) clearTimeout(retryTimeout);
+      };
+    }, async () => applySnapshot(await getDocs(q)));
   }, [user, profile]);
 
   const markAsRead = async (id: string) => {

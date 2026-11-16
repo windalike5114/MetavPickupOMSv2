@@ -1,9 +1,11 @@
+import type { QuerySnapshot, DocumentData } from 'firebase/firestore';
+import { startWorkPolling, subscribeDuringWorkHours } from '../lib/workHours';
 import React, { useEffect, useState, useMemo } from 'react';
 import { 
   collection, 
   query, 
   where, 
-  onSnapshot, 
+  onSnapshot, getDocs,
   doc, 
   updateDoc, 
   serverTimestamp,
@@ -96,7 +98,7 @@ export const PickingQueue: React.FC = () => {
       where('warehouseStatus', 'in', ['Pending', 'Picking', 'Picked'])
     );
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
+    const applySnapshot = (snapshot: QuerySnapshot<DocumentData>) => {
       const ordersData = snapshot.docs.map(doc => ({
         id: doc.id,
         ...doc.data()
@@ -111,9 +113,14 @@ export const PickingQueue: React.FC = () => {
 
       setOrders(activeOrders);
       setLoading(false);
+    };
+    const loadError = (error: unknown) => {
+      console.error('Could not load picking orders:', error);
+      setLoading(false);
+    };
+    return subscribeDuringWorkHours('nz', () => onSnapshot(q, applySnapshot, loadError), async () => {
+      try { applySnapshot(await getDocs(q)); } catch (error) { loadError(error); }
     });
-
-    return () => unsubscribe();
   }, [activeWarehouse]);
 
   useEffect(() => {
@@ -142,11 +149,10 @@ export const PickingQueue: React.FC = () => {
       }
     };
 
-    loadCounterPickups();
-    const timer = window.setInterval(loadCounterPickups, 15000);
+    const stopPolling = startWorkPolling({ site: 'nz', interval: 15_000, load: loadCounterPickups, loadOnMount: true, whileHidden: false });
     return () => {
       stopped = true;
-      window.clearInterval(timer);
+      stopPolling();
     };
   }, [activeWarehouse, token]);
 

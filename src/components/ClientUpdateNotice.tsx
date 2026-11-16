@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { CN_API_ONLY } from '../constants';
+import { startWorkPolling } from '../lib/workHours';
 
 const checkInterval = 60_000;
 
@@ -29,17 +30,13 @@ export function ClientUpdateNotice() {
       }
     };
 
-    void check();
-    const timer = window.setInterval(check, checkInterval);
-    document.addEventListener('visibilitychange', check);
-    window.addEventListener('focus', check);
+    const isCn = CN_API_ONLY || /\/cn(?:\/|$)/.test(window.location.pathname);
+    const stopPolling = startWorkPolling({ site: isCn ? 'cn' : 'nz', interval: checkInterval, load: check, loadOnMount: true });
     window.addEventListener('online', check);
     window.addEventListener('vite:preloadError', check);
     return () => {
       pending?.abort();
-      window.clearInterval(timer);
-      document.removeEventListener('visibilitychange', check);
-      window.removeEventListener('focus', check);
+      stopPolling();
       window.removeEventListener('online', check);
       window.removeEventListener('vite:preloadError', check);
     };
