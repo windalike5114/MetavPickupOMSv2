@@ -677,7 +677,7 @@ async function startServer() {
         const updated = o?.updatedAt;
         let updatedMs = 0;
         if (updated && typeof updated === 'object' && typeof updated._seconds === 'number') {
-          updatedMs = updated._seconds * 1000;
+          updatedMs = updated._seconds * 1000 + Math.floor((updated._nanoseconds || 0) / 1000000);
         } else if (typeof updated === 'string') {
           const t = new Date(updated).getTime();
           updatedMs = Number.isFinite(t) ? t : 0;
@@ -772,7 +772,21 @@ async function startServer() {
         effectiveWarehouses = requestedWh ? [requestedWh] : effectiveWarehouses;
       }
       let orders: any[] = [];
-      if (isCnPortal && !warehouseId) {
+      if (isCnPortal && !warehouseId && Number.isFinite(updatedAfterMs) && updatedAfterMs > 0) {
+        // Both ISO strings and Firestore timestamps are used for updatedAt.
+        const collection = currentDb.collection("orders");
+        const cursorIso = new Date(updatedAfterMs).toISOString();
+        const cursorTimestamp = admin.firestore.Timestamp.fromMillis(updatedAfterMs);
+        const [isoUpdates, timestampUpdates, newOrders] = await Promise.all([
+          collection.where("updatedAt", ">=", cursorIso).orderBy("updatedAt", "desc").limit(limitValue).get(),
+          collection.where("updatedAt", ">=", cursorTimestamp).where("updatedAt", "<=", admin.firestore.Timestamp.now()).orderBy("updatedAt", "desc").limit(limitValue).get(),
+          collection.where("createdTime", ">=", cursorIso).orderBy("createdTime", "desc").limit(limitValue).get()
+        ]);
+        const changed = [isoUpdates, timestampUpdates, newOrders]
+          .flatMap(snapshot => snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id })))
+          .filter((order: any) => !order.warehouseId || ["AKL", "CHC"].includes(order.warehouseId));
+        orders = mergeOrdersDedup(changed, []);
+      } else if (isCnPortal && !warehouseId) {
         const [warehouseOrders, unassignedOrders] = await Promise.all([
           fetchByWarehouseIn(["AKL", "CHC"]),
           fetchRecentUnassigned()
@@ -2456,6 +2470,7 @@ async function startServer() {
     const permitted = (name: string) => hasPermission(req.user, name);
     const canWrite = action === "edit" ? permitted("Edit Order")
       : action === "payment" ? permitted("Add Payment") || permitted("Edit Payment")
+      : action === "review" ? permitted("Review Orders")
       : action === "cancel" && permitted("Cancel Orders");
     if (!canWrite) return res.status(403).json({ success: false, error: "没有执行此操作的权限。" });
     const currentDb = await initDb();
@@ -2476,8 +2491,11 @@ async function startServer() {
             (!isSuperAdmin(req.user.username) && !allowed.includes("*") && !allowed.includes(order.warehouseId)))) {
           return { status: 403, error: "没有此仓库的操作权限。" };
         }
-        if (order.status !== "Created" || order.pickupExceptionStatus ||
-            (action !== "payment" && order.warehouseStatus)) {
+        if (action === "review" && order.status !== "Picked Up") {
+          return { status: 409, error: "只有已提货订单可以审核。" };
+        }
+        if (action !== "review" && (order.status !== "Created" || order.pickupExceptionStatus ||
+            (action !== "payment" && order.warehouseStatus))) {
           return { status: 409, error: "订单状态已变更或已开始仓库处理，请刷新后查看。" };
         }
         const update: Record<string, unknown> = {};
@@ -2511,16 +2529,19 @@ async function startServer() {
           update.paymentMethod = status === "Paid" ? changes.paymentMethod.trim() : null;
           update.paymentTime = status === "Paid" ? order.paymentTime || timestamp : null;
           update.paymentBy = status === "Paid" ? order.paymentBy || operator : null;
+        } else if (action === "review") {
+          update.status = "Reviewed";
+          update.statusUpdatedAt = timestamp;
         } else {
           if (order.paymentStatus === "Paid") return { status: 409, error: "已付款订单不能直接取消。" };
           update.status = "Cancelled";
           update.statusUpdatedAt = timestamp;
         }
         tx.update(orderRef, { ...update, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
-        const labels: Record<string, string> = { edit: "Order Updated", payment: "Payment Updated", cancel: "Order Cancelled" };
+        const labels: Record<string, string> = { edit: "Order Updated", payment: "Payment Updated", cancel: "Order Cancelled", review: "Order Reviewed" };
         tx.create(currentDb.collection("logs").doc(), {
           timestamp, userId: req.user.uid, userName: operator, orderId: orderRef.id, action: labels[action],
-          details: Object.keys(update).join(", "), category: "Order"
+          details: action === "review" ? "Status: Picked Up → Reviewed" : Object.keys(update).join(", "), category: "Order"
         });
         return { status: 200 };
       });

@@ -614,7 +614,7 @@ export const OrderDetail: React.FC = () => {
 
     // Rule: Only picked up orders can be reviewed
     if (newStatus === 'Reviewed' && order.status !== 'Picked Up') {
-      alert('Only orders that have been picked up can be marked as reviewed.');
+      alert(isCnApiMode ? '只有已提货订单可以审核。' : 'Only orders that have been picked up can be marked as reviewed.');
       return;
     }
 
@@ -655,7 +655,7 @@ export const OrderDetail: React.FC = () => {
           'x-v2-auth-token': `Bearer ${token}`,
           'x-warehouse-id': activeWarehouse || ''
         },
-        body: JSON.stringify(isCnApiMode ? { action: 'cancel', orderVersion } : {
+        body: JSON.stringify(isCnApiMode ? { action: newStatus === 'Reviewed' ? 'review' : 'cancel', orderVersion } : {
           orderId: id,
           updateData: { status: newStatus }
         })
@@ -1186,7 +1186,7 @@ export const OrderDetail: React.FC = () => {
               </button>
             )}
 
-            {!isCnApiMode && hasPermission(profile, 'Review Orders', profile?.username || profile?.email) && order.status === 'Picked Up' && (
+            {hasPermission(profile, 'Review Orders', profile?.username || profile?.email) && order.status === 'Picked Up' && (
               <button
                 onClick={() => handleStatusChange('Reviewed')}
                 className="inline-flex items-center px-3 py-1.5 bg-purple-600 rounded-xl text-xs font-bold text-white hover:bg-purple-700 transition-all shadow-lg shadow-purple-200"

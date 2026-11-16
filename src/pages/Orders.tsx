@@ -97,7 +97,7 @@ const setOrderCache = async (record: OrderCacheRecord): Promise<void> => {
 const getOrderSortMs = (order: any): number => {
   const updated = order?.updatedAt;
   if (updated && typeof updated === 'object' && typeof updated._seconds === 'number') {
-    return updated._seconds * 1000;
+    return updated._seconds * 1000 + Math.floor((updated._nanoseconds || 0) / 1000000);
   }
   if (typeof updated === 'string') {
     const t = new Date(updated).getTime();
@@ -155,6 +155,7 @@ export const Orders = () => {
   const menuRef = React.useRef<HTMLDivElement>(null);
   const [isScrolled, setIsScrolled] = useState(false);
   const sentinelRef = useRef<HTMLDivElement>(null);
+  const orderRequest = useRef<AbortController | null>(null);
   const [showPickupModal, setShowPickupModal] = useState(false);
   const [pickupOrder, setPickupOrder] = useState<Order | null>(null);
   const [confirmingPickup, setConfirmingPickup] = useState(false);
@@ -245,13 +246,27 @@ export const Orders = () => {
   }, [notification]);
 
   useEffect(() => {
-    const controller = new AbortController();
-    if (isCnApiMode || activeWarehouse) {
-      void fetchOrders(controller.signal);
+    if (isCnApiMode || activeWarehouse) void fetchOrders('initial');
+    if (isCnApiMode) {
+      const refreshVisible = () => {
+        if (document.visibilityState === 'visible') void fetchOrders('background');
+      };
+      const timer = window.setInterval(refreshVisible, 15000);
+      document.addEventListener('visibilitychange', refreshVisible);
+      return () => {
+        window.clearInterval(timer);
+        document.removeEventListener('visibilitychange', refreshVisible);
+        orderRequest.current?.abort();
+        orderRequest.current = null;
+      };
     }
-    fetchStores();
-    return () => controller.abort();
+    return () => {
+      orderRequest.current?.abort();
+      orderRequest.current = null;
+    };
   }, [activeWarehouse, token, isCnApiMode, pickedDate, pickedWarehouse]);
+
+  useEffect(() => { void fetchStores(); }, [activeWarehouse, token, isCnApiMode]);
 
   const fetchStores = async () => {
     try {
@@ -285,16 +300,21 @@ export const Orders = () => {
     }
   };
 
-  const fetchOrders = async (signal?: AbortSignal) => {
+  const fetchOrders = async (mode: 'initial' | 'manual' | 'background' = 'manual') => {
     if (!isCnApiMode && !activeWarehouse) return;
     if (!token) return;
-    setLoading(true);
+    if (mode === 'background' && orderRequest.current) return;
+    orderRequest.current?.abort();
+    const controller = new AbortController();
+    orderRequest.current = controller;
+    const { signal } = controller;
+    if (mode !== 'background') setLoading(true);
     try {
       if (pickedDate) {
-        setOrders([]);
+        if (mode === 'initial') setOrders([]);
         const params = new URLSearchParams({ pickedDate, warehouseId: pickedWarehouse });
         const response = await fetch(`${API_BASE_URL}/api/orders/list?${params}`, {
-          headers: { 'x-v2-auth-token': `Bearer ${token}` }, signal,
+          headers: { 'x-v2-auth-token': `Bearer ${token}` }, cache: 'no-store', signal,
         });
         const data = await response.json();
         if (!response.ok || !data.success) throw new Error(data.error || '无法获取取货明细');
@@ -306,11 +326,11 @@ export const Orders = () => {
       const cacheKey = `orders:${cacheScope}:${user?.uid || 'anon'}:${warehouseScope}`;
       const cached = await getOrderCache(cacheKey);
       if (signal?.aborted) return;
-      if (cached?.orders?.length) {
+      if (mode === 'initial' && cached?.orders?.length) {
         setOrders(cached.orders);
         setLoading(false);
         const cacheAgeMs = cached.updatedAt ? Date.now() - new Date(cached.updatedAt).getTime() : Infinity;
-        if (cacheAgeMs >= 0 && cacheAgeMs < ORDER_CACHE_TTL_MS) {
+        if (!isCnApiMode && cacheAgeMs >= 0 && cacheAgeMs < ORDER_CACHE_TTL_MS) {
           return;
         }
       }
@@ -319,13 +339,14 @@ export const Orders = () => {
         limit: '1000'
       });
       if (cached?.lastSyncAt) {
-        params.set('updatedAfter', cached.lastSyncAt);
+        const cursor = Date.parse(cached.lastSyncAt);
+        if (Number.isFinite(cursor)) params.set('updatedAfter', new Date(cursor - 1000).toISOString());
       }
       const response = await fetch(`${API_BASE_URL}/api/orders/list?${params.toString()}`, {
         headers: {
           'x-v2-auth-token': `Bearer ${token}`,
           ...(isCnApiMode ? {} : { 'x-warehouse-id': activeWarehouse || '' })
-        }, signal
+        }, cache: 'no-store', signal
       });
       const raw = await response.text();
       let data: any = null;
@@ -357,9 +378,12 @@ export const Orders = () => {
     } catch (err: any) {
       if (signal?.aborted) return;
       console.error('Error fetching orders:', err);
-      setNotification({ message: err.message || 'Failed to fetch orders', type: 'error' });
+      if (mode !== 'background') setNotification({ message: err.message || 'Failed to fetch orders', type: 'error' });
     } finally {
-      setLoading(false);
+      if (orderRequest.current === controller) {
+        orderRequest.current = null;
+        if (mode !== 'background') setLoading(false);
+      }
     }
   };
   const getWarehouseStatusLabel = (order: Order) => order.warehouseStatus || 'Not Requested';

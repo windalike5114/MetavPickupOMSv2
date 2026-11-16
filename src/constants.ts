@@ -9,7 +9,7 @@ export const WAREHOUSE_NAMES: Record<string, string> = {
 };
 
 export const API_BASE_URL = "";
-export const APP_VERSION = "1.2.5";
+export const APP_VERSION = "1.2.6";
 const isCnHostname =
   typeof window !== "undefined" &&
   (window.location.hostname === "cn.acapickup.com" ||
