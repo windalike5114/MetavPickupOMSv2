@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { collection, query, getDocs, addDoc, updateDoc, deleteDoc, doc, getDoc, writeBatch, orderBy, limit, startAfter, getCountFromServer, where, setDoc, documentId } from 'firebase/firestore';
+import { collection, query, getDocs, doc, getDoc, orderBy, limit, startAfter, getCountFromServer, where, documentId } from 'firebase/firestore';
 import { db } from '../firebase';
 import { useAuth } from '../components/AuthProvider';
 import { SKU } from '../types';
@@ -29,6 +29,9 @@ import {
 
 import { PageHeader } from '../components/PageHeader';
 import { useDebounce } from '../hooks/useDebounce';
+
+type SkuWriteMode = 'edit' | 'import' | 'delete' | 'repair' | 'clear';
+type SkuWrite = { type: 'delete' | 'set' | 'update'; id: string; data?: Partial<SKU> };
 
 export const SKUDatabase = () => {
   const { profile, user, activeWarehouse, token } = useAuth();
@@ -65,6 +68,34 @@ export const SKUDatabase = () => {
   const [clearing, setClearing] = useState(false);
   const [isScrolled, setIsScrolled] = useState(false);
   const sentinelRef = useRef<HTMLDivElement>(null);
+  const keyResolver = useRef<((value: string | null) => void) | null>(null);
+  const [askingForKey, setAskingForKey] = useState(false);
+  const [keyInput, setKeyInput] = useState('');
+
+  const requestManagementKey = () => {
+    if (keyResolver.current) return Promise.resolve(null);
+    setKeyInput('');
+    setAskingForKey(true);
+    return new Promise<string | null>(resolve => { keyResolver.current = resolve; });
+  };
+
+  const closeManagementKey = (value: string | null) => {
+    keyResolver.current?.(value);
+    keyResolver.current = null;
+    setKeyInput('');
+    setAskingForKey(false);
+  };
+
+  const writeSkuBatch = async (mode: SkuWriteMode, operations: SkuWrite[], managementKey: string) => {
+    if (!operations.length) return;
+    const response = await fetch(API_BASE_URL + '/api/skus/manage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-v2-auth-token': 'Bearer ' + token },
+      body: JSON.stringify({ mode, operations, managementKey })
+    });
+    const result = await response.json();
+    if (!response.ok || !result.success) throw new Error(result.error || 'Failed to save SKU changes.');
+  };
 
   useEffect(() => {
     const observer = new IntersectionObserver(
@@ -176,6 +207,8 @@ export const SKUDatabase = () => {
     const proceed = window.confirm(`This will perform write operations to fix ${brokenSkus.length} identified issues. Proceed?`);
     if (!proceed) return;
 
+    const managementKey = await requestManagementKey();
+    if (!managementKey) return;
     setCleaningHealth(true);
     try {
       const deleteIds = new Set<string>();
@@ -264,19 +297,7 @@ export const SKUDatabase = () => {
 
       const CHUNK_SIZE = 450;
       for (let i = 0; i < operations.length; i += CHUNK_SIZE) {
-        const chunk = operations.slice(i, i + CHUNK_SIZE);
-        const batch = writeBatch(db);
-        
-        chunk.forEach(op => {
-          const docRef = doc(db, 'skus', op.id);
-          if (op.type === 'delete') {
-            batch.delete(docRef);
-          } else {
-            batch.update(docRef, op.data);
-          }
-        });
-        
-        await batch.commit();
+        await writeSkuBatch('repair', operations.slice(i, i + CHUNK_SIZE), managementKey);
       }
 
       await logAction(profile, 'Data Health Fix', `Fixed ${updateMap.size} records and removed ${deleteIds.size} duplicates/invalid records.`, null, 'SKU');
@@ -374,6 +395,8 @@ export const SKUDatabase = () => {
       return;
     }
 
+    const managementKey = await requestManagementKey();
+    if (!managementKey) return;
     const skuUpper = formSku.trim().toUpperCase();
     const safeDocId = skuUpper.replace(/\//g, '_');
     const rawName = formName.trim();
@@ -433,22 +456,12 @@ export const SKUDatabase = () => {
         data.createdAt = now;
       }
 
-      // If we are editing an existing record and the SKU ID has changed, 
-      // we need to delete the old document.
+      const operations: SkuWrite[] = [{ type: 'set', id: safeDocId, data }];
       if (editingSku?.id && editingSku.id !== safeDocId) {
-        try {
-          await deleteDoc(doc(db, 'skus', editingSku.id));
-        } catch (err) {
-          handleFirestoreError(err, 'delete', `skus/${editingSku.id}`);
-        }
+        operations.push({ type: 'delete', id: editingSku.id });
       }
-      
-      try {
-        await setDoc(docRef, data, { merge: true });
-      } catch (err) {
-        handleFirestoreError(err, 'write', `skus/${safeDocId}`);
-      }
-      
+      await writeSkuBatch('edit', operations, managementKey);
+
       await logAction(profile, editingSku?.id ? 'Edit SKU' : 'Add SKU', `${editingSku?.id ? 'Updated' : 'Added'} SKU ${skuUpper}`, null, 'SKU');
       
       setShowEditModal(false);
@@ -459,7 +472,7 @@ export const SKUDatabase = () => {
         const info = JSON.parse(err.message);
         alert(`Failed to save SKU: ${info.error}`);
       } else {
-        alert('Failed to save SKU.');
+        alert(err instanceof Error ? err.message : 'Failed to save SKU.');
       }
     }
   };
@@ -470,8 +483,10 @@ export const SKUDatabase = () => {
       alert('Only administrators can delete SKUs.');
       return;
     }
+    const managementKey = await requestManagementKey();
+    if (!managementKey) return;
     try {
-      await deleteDoc(doc(db, 'skus', deletingSku.id));
+      await writeSkuBatch('delete', [{ type: 'delete', id: deletingSku.id }], managementKey);
       await logAction(profile, 'Delete SKU', `Deleted SKU ${deletingSku.sku}`, null, 'SKU');
       setShowDeleteModal(false);
       setDeletingSku(null);
@@ -479,7 +494,7 @@ export const SKUDatabase = () => {
       fetchSKUs();
     } catch (err) {
       console.error(err);
-      alert('Failed to delete SKU.');
+      alert(err instanceof Error ? err.message : 'Failed to delete SKU.');
     }
   };
 
@@ -490,16 +505,14 @@ export const SKUDatabase = () => {
       return;
     }
     
+    const managementKey = await requestManagementKey();
+    if (!managementKey) return;
     setLoading(true);
     try {
       const CHUNK_SIZE = 450;
       for (let i = 0; i < selectedSkuIds.length; i += CHUNK_SIZE) {
-        const chunk = selectedSkuIds.slice(i, i + CHUNK_SIZE);
-        const batch = writeBatch(db);
-        chunk.forEach(id => {
-          batch.delete(doc(db, 'skus', id));
-        });
-        await batch.commit();
+        const operations = selectedSkuIds.slice(i, i + CHUNK_SIZE).map(id => ({ type: 'delete' as const, id }));
+        await writeSkuBatch('delete', operations, managementKey);
       }
       
       await logAction(profile, 'Bulk Delete SKU', `Deleted ${selectedSkuIds.length} SKUs`, null, 'SKU');
@@ -509,7 +522,7 @@ export const SKUDatabase = () => {
       alert(`Successfully deleted ${selectedSkuIds.length} SKUs.`);
     } catch (err) {
       console.error(err);
-      alert('Failed to delete SKUs.');
+      alert(err instanceof Error ? err.message : 'Failed to delete SKUs.');
     } finally {
       setLoading(false);
     }
@@ -535,6 +548,8 @@ export const SKUDatabase = () => {
     const proceed = window.confirm(`This will delete ALL ${total} records. This action is irreversible. Proceed?`);
     if (!proceed) return;
 
+    const managementKey = await requestManagementKey();
+    if (!managementKey) return;
     setClearing(true);
     try {
       let deletedCount = 0;
@@ -547,12 +562,8 @@ export const SKUDatabase = () => {
         
         if (snap.empty) break;
 
-        const batch = writeBatch(db);
-        snap.docs.forEach(doc => {
-          batch.delete(doc.ref);
-        });
-        
-        await batch.commit();
+        const operations = snap.docs.map(record => ({ type: 'delete' as const, id: record.id }));
+        await writeSkuBatch('clear', operations, managementKey);
         deletedCount += snap.docs.length;
         
         // If we got fewer than CHUNK_SIZE, we're done
@@ -586,25 +597,7 @@ export const SKUDatabase = () => {
     );
   };
 
-  const handleFirestoreError = (error: any, operation: string, path: string) => {
-    const errInfo = {
-      error: error instanceof Error ? error.message : String(error),
-      operationType: operation,
-      path,
-      authInfo: {
-        userId: user?.uid,
-        email: profile?.email,
-        emailVerified: true,
-        isAnonymous: false,
-        tenantId: undefined,
-        providerInfo: []
-      }
-    };
-    console.error('Firestore Error:', JSON.stringify(errInfo));
-    throw new Error(JSON.stringify(errInfo));
-  };
-
-  const processBatchUpload = async (dataToProcess: string) => {
+  const processBatchUpload = async (dataToProcess: string, managementKey: string) => {
     if (!dataToProcess) {
       alert('No data to process.');
       return;
@@ -677,15 +670,13 @@ export const SKUDatabase = () => {
 
       for (let i = 0; i < entries.length; i += CHUNK_SIZE) {
         const chunk = entries.slice(i, i + CHUNK_SIZE);
-        const batch = writeBatch(db);
+        const operations: SkuWrite[] = [];
         
         const docRefs = chunk.map(([skuUpper]) => {
           const safeDocId = skuUpper.replace(/\//g, '_');
           return doc(db, 'skus', safeDocId);
         });
         const existingSnaps = await Promise.all(docRefs.map(ref => getDoc(ref)));
-
-        let updatesInThisBatch = 0;
 
         for (let j = 0; j < chunk.length; j++) {
           const [skuUpper, data] = chunk[j];
@@ -743,19 +734,11 @@ export const SKUDatabase = () => {
             updateData.createdAt = now;
           }
 
-          batch.set(docRefs[j], updateData, { merge: true });
-          
-          updatesInThisBatch++;
+          operations.push({ type: 'set', id: docRefs[j].id, data: updateData });
           totalUploaded++;
         }
         
-        if (updatesInThisBatch > 0) {
-          try {
-            await batch.commit();
-          } catch (err) {
-            handleFirestoreError(err, 'write', 'skus/batch');
-          }
-        }
+        await writeSkuBatch('import', operations, managementKey);
       }
       
       // Create detailed log message
@@ -792,7 +775,7 @@ export const SKUDatabase = () => {
         const info = JSON.parse(err.message);
         alert(`Failed to upload SKUs: ${info.error}`);
       } else {
-        alert('Failed to upload SKUs. Ensure CSV format is: SKU,Name,Location.');
+        alert(err instanceof Error ? err.message : 'Failed to upload SKUs.');
       }
     } finally {
       setUploading(false);
@@ -803,12 +786,14 @@ export const SKUDatabase = () => {
     let processed = 0;
     try {
       const sheet = parseSkuReferenceSheet(csvData);
-      if (!sheet) {
-        await processBatchUpload(csvData);
-        return;
-      }
       if (!token || !hasPermission(profile, 'Upload SKU', profile?.email)) {
         throw new Error('SKU upload permission required.');
+      }
+      const managementKey = await requestManagementKey();
+      if (!managementKey) return;
+      if (!sheet) {
+        await processBatchUpload(csvData, managementKey);
+        return;
       }
       setUploading(true);
       let updated = 0;
@@ -824,7 +809,7 @@ export const SKUDatabase = () => {
             'Content-Type': 'application/json',
             'x-v2-auth-token': 'Bearer ' + token
           },
-          body: JSON.stringify({ rows })
+          body: JSON.stringify({ rows, managementKey })
         });
         const result = await response.json();
         if (!response.ok || !result.success) {
@@ -876,7 +861,7 @@ export const SKUDatabase = () => {
       .filter(s => {
         const matchesSearch = 
           (s.sku || '').toLowerCase().includes(debouncedSearchTerm.toLowerCase()) ||
-          (s.productName || '').toLowerCase().includes(debouncedSearchTerm.toLowerCase());
+          [s.productName, s.ref1, s.ref2].some(value => value?.toLowerCase().includes(debouncedSearchTerm.toLowerCase()));
         
         const effectiveLocation = effectiveSkuLocation(s);
         const matchesLocation = locationFilter === 'All' || effectiveLocation === locationFilter;
@@ -1130,6 +1115,8 @@ export const SKUDatabase = () => {
                 )}
                 <th className="px-6 py-4">SKU</th>
                 <th className="px-6 py-4">Product Name</th>
+                <th className="px-6 py-4">Ref 1</th>
+                <th className="px-6 py-4">Ref 2</th>
                 <th className="px-6 py-4">Location</th>
                 <th className="px-6 py-4 text-right">Actions</th>
               </tr>
@@ -1138,12 +1125,12 @@ export const SKUDatabase = () => {
               {loading ? (
                 [1,2,3].map(i => (
                   <tr key={i} className="animate-pulse">
-                    <td colSpan={isAdmin(profile, profile?.email) ? 5 : 4} className="px-6 py-4"><div className="h-6 bg-slate-100 rounded"></div></td>
+                    <td colSpan={isAdmin(profile, profile?.email) ? 7 : 6} className="px-6 py-4"><div className="h-6 bg-slate-100 rounded"></div></td>
                   </tr>
                 ))
               ) : paginatedSkus.length === 0 ? (
                 <tr>
-                  <td colSpan={isAdmin(profile, profile?.email) ? 5 : 4} className="px-6 py-12 text-center text-slate-400">No SKUs found.</td>
+                  <td colSpan={isAdmin(profile, profile?.email) ? 7 : 6} className="px-6 py-12 text-center text-slate-400">No SKUs found.</td>
                 </tr>
               ) : (
                 paginatedSkus.map((sku) => (
@@ -1163,6 +1150,8 @@ export const SKUDatabase = () => {
                     )}
                     <td className="px-6 py-4 font-bold text-slate-900">{sku.sku}</td>
                     <td className="px-6 py-4 text-slate-600">{sku.productName}</td>
+                    <td className="px-6 py-4 text-slate-700">{sku.ref1 || "—"}</td>
+                    <td className="px-6 py-4 text-slate-700">{sku.ref2 || "—"}</td>
                     <td className="px-6 py-4">
                       <span className="px-2 py-1 bg-indigo-50 text-indigo-600 rounded text-xs font-bold">
                         {effectiveSkuLocation(sku)}
@@ -1364,6 +1353,35 @@ export const SKUDatabase = () => {
               </div>
             </div>
           </div>
+        </div>
+      )}
+      {askingForKey && (
+        <div className="fixed inset-0 z-[70] grid place-items-center bg-slate-900/60 p-4">
+          <form
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="sku-management-key-title"
+            className="w-full max-w-sm space-y-4 rounded-xl bg-white p-6 text-slate-900 shadow-xl"
+            onSubmit={event => { event.preventDefault(); closeManagementKey(keyInput); }}
+            onKeyDown={event => { if (event.key === 'Escape') closeManagementKey(null); }}
+          >
+            <h2 id="sku-management-key-title" className="text-lg font-semibold">SKU management key</h2>
+            <input
+              autoFocus
+              aria-label="SKU management key"
+              type="password"
+              autoComplete="off"
+              required
+              maxLength={512}
+              className="w-full rounded-lg border border-slate-400 px-3 py-2"
+              value={keyInput}
+              onChange={event => setKeyInput(event.target.value)}
+            />
+            <div className="flex justify-end gap-2">
+              <button type="button" className="rounded-lg border px-3 py-2" onClick={() => closeManagementKey(null)}>Cancel</button>
+              <button className="rounded-lg bg-indigo-600 px-3 py-2 text-white" type="submit">Continue</button>
+            </div>
+          </form>
         </div>
       )}
       {/* Data Health Check Modal */}

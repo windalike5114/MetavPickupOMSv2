@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { Boxes, ChevronLeft, ChevronRight, ClipboardList, PackageCheck, RefreshCw, RotateCcw, ShoppingBag } from 'lucide-react';
 import { DateTime } from 'luxon';
@@ -44,8 +44,11 @@ const trendWarehouses = [
   { key: 'CHC', label: '基督城', color: '#b45309', dashed: true },
 ] as const;
 
-const loadTrend = async (date: string, token: string, signal: AbortSignal): Promise<DailyStats & { days: DailyStats[] }> => {
-  const response = await fetch(`${API_BASE_URL}/api/cn/dashboard/stats?date=${date}&days=7`, {
+type DashboardData = DailyStats & { days: DailyStats[] };
+const dashboardCache = new Map<string, DashboardData>();
+
+const loadTrend = async (date: string, token: string, force: boolean, signal: AbortSignal): Promise<DashboardData> => {
+  const response = await fetch(`${API_BASE_URL}/api/cn/dashboard/stats?date=${date}&days=7${force ? "&refresh=1" : ""}`, {
     headers: { 'x-v2-auth-token': `Bearer ${token}` },
     signal,
   });
@@ -189,12 +192,12 @@ function WarehouseChart({ title, unit, warehouses, online, local }: ChartProps) 
 }
 
 export const CnPortalHome = () => {
-  const { token } = useAuth();
+  const { token, user } = useAuth();
   const [params, setParams] = useSearchParams();
-  const [revision, refresh] = useState(0);
-  const [stats, setStats] = useState<DailyStats | null>(null);
+  const [stats, setStats] = useState<{ key: string; data: DashboardData } | null>(null);
+  const appliedRefresh = useRef(0);
+  const [requestedRefresh, setRequestedRefresh] = useState<{ date: string; count: number } | null>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
-  const [trend, setTrend] = useState<{ date: string; days: DailyStats[] } | null>(null);
   const [trendMetric, setTrendMetric] = useState<TrendMetric>('totalTransactions');
   const today = DateTime.now().setZone(zone).startOf('day');
   const todayIso = today.toISODate()!;
@@ -202,22 +205,26 @@ export const CnPortalHome = () => {
   const parsed = /^\d{4}-\d{2}-\d{2}$/.test(requested) ? DateTime.fromISO(requested, { zone }) : null;
   const day = parsed?.isValid && parsed <= today ? parsed : today;
   const date = day.toISODate()!;
+  const cacheKey = [user?.uid, date].join(":");
 
   useEffect(() => {
     if (!token) return;
     const controller = new AbortController();
     setStatus('loading');
-    setTrend(null);
-    void loadTrend(date, token, controller.signal).then(data => {
+    const force = requestedRefresh?.date === date && requestedRefresh.count !== appliedRefresh.current;
+    if (force) appliedRefresh.current = requestedRefresh.count;
+    void loadTrend(date, token, force, controller.signal).then(data => {
       if (controller.signal.aborted) return;
-      setStats(data);
-      setTrend({ date, days: data.days });
+      dashboardCache.delete(cacheKey);
+      dashboardCache.set(cacheKey, data);
+      if (dashboardCache.size > 12) dashboardCache.delete(dashboardCache.keys().next().value!);
+      setStats({ key: cacheKey, data });
       setStatus('ready');
     }).catch(() => {
       if (!controller.signal.aborted) setStatus('error');
     });
     return () => controller.abort();
-  }, [date, token, revision]);
+  }, [date, token, requestedRefresh, cacheKey]);
 
   const selectDate = (value: string) => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || value > todayIso || value === date) return;
@@ -229,9 +236,9 @@ export const CnPortalHome = () => {
     });
   };
 
-  const current = stats?.date === date && status === 'ready' ? stats : null;
+  const current = stats?.key === cacheKey ? stats.data : dashboardCache.get(cacheKey);
   const total = current?.totals;
-  const retry = () => refresh(value => value + 1);
+  const retry = () => setRequestedRefresh(previous => ({ date, count: (previous?.count || 0) + 1 }));
   const dayButton = 'grid size-10 shrink-0 place-items-center rounded-lg text-slate-700 hover:bg-slate-100 disabled:text-slate-300 disabled:hover:bg-transparent focus-visible:outline-2 focus-visible:outline-indigo-600';
 
   return (
@@ -305,7 +312,7 @@ export const CnPortalHome = () => {
                 </table>
               </div>
             </section>
-            {trend?.date === date && <TrendChart key={date} days={trend.days} selectedDate={date} metric={trendMetric} setMetric={setTrendMetric} />}
+            <TrendChart key={date} days={current.days} selectedDate={date} metric={trendMetric} setMetric={setTrendMetric} />
             <div className="flex flex-wrap items-center gap-x-5 gap-y-2 px-1 text-xs font-semibold text-slate-700">
               <span className="flex items-center gap-2"><span className="cn-chart-online size-2.5 rounded-sm" />线上取货</span>
               <span className="flex items-center gap-2"><span className="cn-chart-offline size-2.5 rounded-sm" />线下出库</span>

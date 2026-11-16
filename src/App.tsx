@@ -8,6 +8,7 @@ import { Orders } from './pages/Orders';
 import { OrderCreate } from './pages/OrderCreate';
 import { OrderDetail } from './pages/OrderDetail';
 import { SKUDatabase } from './pages/SKUDatabase';
+import { CnSkuDatabase } from './pages/CnSkuDatabase';
 import SKULogs from './pages/SKULogs';
 import { Settings } from './pages/Settings';
 import { UserManagement } from './pages/UserManagement';
@@ -188,6 +189,7 @@ export default function App() {
               <Route path="/cn/orders/create" element={<ProtectedCnRoute><OrderCreate /></ProtectedCnRoute>} />
               <Route path="/cn/orders/bulk-import" element={<ProtectedCnRoute><BulkOrderUpload /></ProtectedCnRoute>} />
               <Route path="/cn/orders/:id" element={<ProtectedCnRoute><OrderDetail /></ProtectedCnRoute>} />
+              <Route path="/cn/skus" element={<ProtectedCnRoute><CnSkuDatabase /></ProtectedCnRoute>} />
               <Route path="/cn/overdue" element={<ProtectedCnRoute><OverdueOrders /></ProtectedCnRoute>} />
               <Route path="/cn/counter-pickups" element={<ProtectedCnRoute><CounterPickupListing /></ProtectedCnRoute>} />
               <Route path="/cn/groups" element={<ProtectedCnRoute><UserGroups /></ProtectedCnRoute>} />

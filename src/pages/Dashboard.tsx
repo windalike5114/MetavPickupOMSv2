@@ -66,8 +66,10 @@ const mergeOrdersById = (base: Order[], incoming: Order[]): Order[] => {
   return Array.from(map.values()).sort((a: Order, b: Order) => getOrderSortMs(b) - getOrderSortMs(a));
 };
 
+type DashboardOrder = Pick<Order, 'id' | 'bookingNumber' | 'customerName' | 'warehouseId' | 'status' | 'createdTime' | 'actualPickupTime' | 'pickupDateScheduled'>;
+
 type DashboardCacheRecord = {
-  orders: Order[];
+  orders: DashboardOrder[];
   updatedAt: string;
 };
 
@@ -92,8 +94,6 @@ export const Dashboard = () => {
   const { profile, user, activeWarehouse, token } = useAuth();
   const location = useLocation();
   const isCnRoute = location.pathname.startsWith('/cn');
-  console.log("Dashboard - User:", user?.uid, "Email:", profile?.email, "IsAdmin:", isSystemAdmin(profile?.username || profile?.email));
-  console.log("Dashboard - Profile Loaded:", !!profile, "Warehouse:", activeWarehouse);
   
   const navigate = useNavigate();
   const [stats, setStats] = useState({
@@ -102,8 +102,8 @@ export const Dashboard = () => {
     created: 0,
     cancelled: 0
   });
-  const [recentOrders, setRecentOrders] = useState<Order[]>([]);
-  const [warningOrders, setWarningOrders] = useState<Order[]>([]);
+  const [recentOrders, setRecentOrders] = useState<DashboardOrder[]>([]);
+  const [warningOrders, setWarningOrders] = useState<DashboardOrder[]>([]);
   const [trendData, setTrendData] = useState<any[]>([]);
   const [announcement, setAnnouncement] = useState<any>(null);
   const [showAnnouncementModal, setShowAnnouncementModal] = useState(false);
@@ -111,6 +111,7 @@ export const Dashboard = () => {
   const [currentTipIndex, setCurrentTipIndex] = useState(0);
   const [isScrolled, setIsScrolled] = useState(false);
   const sentinelRef = useRef<HTMLDivElement>(null);
+  const dashboardRequest = useRef(0);
 
   useEffect(() => {
     const observer = new IntersectionObserver(
@@ -176,12 +177,31 @@ export const Dashboard = () => {
 
   const [allTips, setAllTips] = useState<any[]>(baseTips);
 
-  const fetchData = async () => {
+  const fetchAnnouncement = async (isCurrent: () => boolean) => {
+    try {
+      const snap = await getDoc(doc(db, 'announcements', 'current'));
+      if (!isCurrent()) return;
+      const data = snap.exists() ? snap.data() : null;
+      setAnnouncement(data);
+      setAllTips(data?.isActive ? [{
+        id: 'announcement', title: 'System Announcement', content: data.content,
+        link: data.link || null, linkText: data.link ? 'Learn More' : null, icon: Megaphone,
+        color: 'from-indigo-600 to-indigo-700', isAnnouncement: true, updatedAt: data.updatedAt
+      }, ...baseTips] : baseTips);
+    } catch (error) {
+      if (isCurrent()) console.error('Error fetching dashboard announcement:', error);
+    }
+  };
+
+  const fetchData = async (force = false) => {
+    const request = ++dashboardRequest.current;
+    const isCurrent = () => dashboardRequest.current === request;
     const warehouse = activeWarehouse || localStorage.getItem('activeWarehouse') || 'AKL';
     setLoading(true);
-    
+    void fetchAnnouncement(isCurrent);
+
     try {
-      const applyDashboardOrders = (orders: Order[]) => {
+      const applyDashboardOrders = (orders: DashboardOrder[]) => {
         // Filter by warehouse: match warehouse OR missing warehouseId (assumed AKL)
         const filteredByWarehouse = orders.filter(order => {
           const orderWarehouse = order.warehouseId || 'AKL';
@@ -238,33 +258,11 @@ export const Dashboard = () => {
 
       const cacheKey = `${DASHBOARD_CACHE_PREFIX}:${user?.uid || 'anon'}:${warehouse}`;
       const cached = getDashboardCache(cacheKey);
-      if (cached?.orders?.length) {
+      if (cached) {
         applyDashboardOrders(cached.orders);
+        setLoading(false);
         const cacheAgeMs = cached.updatedAt ? Date.now() - new Date(cached.updatedAt).getTime() : Infinity;
-        if (cacheAgeMs >= 0 && cacheAgeMs < DASHBOARD_CACHE_TTL_MS) {
-          const announcementSnap = await getDoc(doc(db, 'announcements', 'current'));
-          let currentTips = [...baseTips];
-          if (announcementSnap.exists()) {
-            const data = announcementSnap.data();
-            setAnnouncement(data);
-            if (data.isActive) {
-              currentTips = [
-                {
-                  id: 'announcement',
-                  title: 'System Announcement',
-                  content: data.content,
-                  link: data.link || null,
-                  linkText: data.link ? 'Learn More' : null,
-                  icon: Megaphone,
-                  color: 'from-indigo-600 to-indigo-700',
-                  isAnnouncement: true,
-                  updatedAt: data.updatedAt
-                },
-                ...baseTips
-              ];
-            }
-          }
-          setAllTips(currentTips);
+        if (!force && cacheAgeMs >= 0 && cacheAgeMs < DASHBOARD_CACHE_TTL_MS) {
           return;
         }
       }
@@ -310,47 +308,28 @@ export const Dashboard = () => {
         }
       }
 
-      const allFetched = snap.docs.map(doc => ({ id: doc.id, ...(doc.data() as object) } as Order));
+      if (!isCurrent()) return;
+      const allFetched = snap.docs.map(doc => {
+        const { bookingNumber, customerName, warehouseId, status, createdTime, actualPickupTime, pickupDateScheduled } = doc.data();
+        return { id: doc.id, bookingNumber, customerName, warehouseId, status, createdTime, actualPickupTime, pickupDateScheduled } as DashboardOrder;
+      });
       applyDashboardOrders(allFetched);
       setDashboardCache(cacheKey, {
         orders: allFetched,
         updatedAt: new Date().toISOString()
       });
 
-      // Announcement
-      const announcementSnap = await getDoc(doc(db, 'announcements', 'current'));
-      let currentTips = [...baseTips];
-      if (announcementSnap.exists()) {
-        const data = announcementSnap.data();
-        setAnnouncement(data);
-        if (data.isActive) {
-          currentTips = [
-            {
-              id: 'announcement',
-              title: 'System Announcement',
-              content: data.content,
-              link: data.link || null,
-              linkText: data.link ? 'Learn More' : null,
-              icon: Megaphone,
-              color: 'from-indigo-600 to-indigo-700',
-              isAnnouncement: true,
-              updatedAt: data.updatedAt
-            },
-            ...baseTips
-          ];
-        }
-      }
-      setAllTips(currentTips);
     } catch (error) {
-      console.error('Error fetching dashboard data:', error);
+      if (isCurrent()) console.error('Error fetching dashboard data:', error);
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchData();
-  }, [activeWarehouse, user]);
+    void fetchData();
+    return () => { dashboardRequest.current += 1; };
+  }, [activeWarehouse, user?.uid]);
 
   const nextTip = () => {
     setCurrentTipIndex((prev) => (prev + 1) % allTips.length);
@@ -369,7 +348,6 @@ export const Dashboard = () => {
     </div>;
   }
 
-  console.log(`Dashboard - Rendering JSX. Loading: ${loading} IsAdmin: ${isSystemAdmin(profile?.username || profile?.email)}`);
 
   return (
     <div className="flex flex-col h-full w-full bg-slate-50 overflow-hidden font-sans">
@@ -381,10 +359,7 @@ export const Dashboard = () => {
         actions={
           <>
             <button 
-              onClick={() => {
-                setLoading(true);
-                fetchData();
-              }}
+              onClick={() => void fetchData(true)}
               className={cn(
                 "p-3 bg-white border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 transition-all",
                 isScrolled ? "p-2 group-hover:p-3" : "p-3"

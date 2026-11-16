@@ -1,4 +1,5 @@
 import express from "express";
+import { scrypt, timingSafeEqual } from "node:crypto";
 import cors from "cors";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -97,6 +98,28 @@ const initDb = async () => {
     return null;
   }
 };
+
+function verifySkuManagementKey(req: any, res: express.Response, next: express.NextFunction) {
+  const storedHash = process.env.SKU_MANAGEMENT_KEY_HASH?.trim();
+  const encoded = storedHash?.match(/^scrypt-v1:([0-9a-f]{32}):([0-9a-f]{64})$/i);
+  if (!encoded) {
+    return res.status(503).json({ success: false, error: "SKU management key has not been configured." });
+  }
+  const supplied = req.body?.managementKey;
+  if (typeof supplied !== "string" || !supplied.length || supplied.length > 512) {
+    return res.status(403).json({ success: false, error: "Invalid SKU management key." });
+  }
+  delete req.body.managementKey;
+  const salt = Buffer.from(encoded[1], "hex");
+  const expected = Buffer.from(encoded[2], "hex");
+  scrypt(supplied, salt, expected.length, { N: 32768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 }, (error, actual) => {
+    if (error) return next(error);
+    if (!timingSafeEqual(expected, actual)) {
+      return res.status(403).json({ success: false, error: "Invalid SKU management key." });
+    }
+    next();
+  });
+}
 
 // Helper Functions for Backend
 const hasPermission = (user: any, permission: string) => {
@@ -854,6 +877,9 @@ async function startServer() {
   });
 
   // CN portal daily overview. Calendar boundaries follow Pacific/Auckland.
+  const dashboardCache = new Map<string, { expires: number; data: object }>();
+  const dashboardPending = new Map<string, Promise<object>>();
+
   app.get("/api/cn/dashboard/stats", authenticate, async (req: any, res) => {
     const currentDb = await initDb();
     if (!currentDb) return res.status(503).json({ success: false, error: "Database not initialized" });
@@ -867,81 +893,97 @@ async function startServer() {
       const day = requestedDate ? cnCalendarDate(requestedDate) : DateTime.now().setZone(AUCKLAND_TIMEZONE).startOf("day");
       const count = req.query.days === "7" ? 7 : 1;
       if (!day || !day.isValid) return res.status(400).json({ success: false, error: "Invalid date. Expected YYYY-MM-DD." });
-      const start = day.minus({ days: count - 1 });
-      const end = day.plus({ days: 1 });
-      const [ordersSnap, counterSnap] = await Promise.all([
-        currentDb.collection("orders").where("actualPickupTime", ">=", start.toUTC().toISO()!)
-          .where("actualPickupTime", "<", end.toUTC().toISO()!).get(),
-        // A later edit may move updatedAt forward. Only use it as a broad lower bound.
-        currentDb.collection("counter_pickups").where("updatedAt", ">=", start.minus({ days: 1 }).toISO()!).get()
-      ]);
-      const daily = new Map(Array.from({ length: count }, (_, index) => [
-        start.plus({ days: index }).toISODate()!,
-        Object.fromEntries([["AKL", "Auckland"], ["CHC", "Christchurch"]].map(([warehouseId, warehouseName]) => [
-          warehouseId, { warehouseId, warehouseName, onlineOrders: 0, onlineItems: 0, grossLocalRequests: 0,
-            grossLocalItems: 0, returnRequests: 0, returnOnlyRequests: 0, returnItems: 0 }
-        ]))
-      ] as const));
-      for (const doc of ordersSnap.docs) {
-        const order = doc.data();
-        const warehouse = normalizeWarehouseId(order.warehouseId);
-        const date = DateTime.fromISO(String(order.actualPickupTime), { zone: AUCKLAND_TIMEZONE }).toISODate();
-        const row = warehouse && date ? daily.get(date)?.[warehouse] : undefined;
-        if (!row) continue;
-        const items = Array.isArray(order.items) ? order.items : [];
-        const picked = items.filter((item: any) => item?.status === "Picked");
-        row.onlineOrders += 1;
-        row.onlineItems += (picked.length ? picked : items).reduce((sum: number, item: any) => sum + Math.max(0, Number(item?.qty) || 0), 0);
+      const key = [count, day.toISODate()].join(":");
+      const cached = dashboardCache.get(key);
+      if (req.query.refresh !== "1" && cached && cached.expires > Date.now()) return res.json(cached.data);
+
+      let pending = dashboardPending.get(key);
+      if (!pending) {
+        pending = (async () => {
+            const start = day.minus({ days: count - 1 });
+            const end = day.plus({ days: 1 });
+            const [ordersSnap, counterSnap] = await Promise.all([
+              currentDb.collection("orders").where("actualPickupTime", ">=", start.toUTC().toISO()!)
+                .where("actualPickupTime", "<", end.toUTC().toISO()!).select("warehouseId", "actualPickupTime", "items").get(),
+              // A later edit may move updatedAt forward. Only use it as a broad lower bound.
+              currentDb.collection("counter_pickups").where("updatedAt", ">=", start.minus({ days: 1 }).toISO()!).get()
+            ]);
+            const daily = new Map(Array.from({ length: count }, (_, index) => [
+              start.plus({ days: index }).toISODate()!,
+              Object.fromEntries([["AKL", "Auckland"], ["CHC", "Christchurch"]].map(([warehouseId, warehouseName]) => [
+                warehouseId, { warehouseId, warehouseName, onlineOrders: 0, onlineItems: 0, grossLocalRequests: 0,
+                  grossLocalItems: 0, returnRequests: 0, returnOnlyRequests: 0, returnItems: 0 }
+              ]))
+            ] as const));
+            for (const doc of ordersSnap.docs) {
+              const order = doc.data();
+              const warehouse = normalizeWarehouseId(order.warehouseId);
+              const date = DateTime.fromISO(String(order.actualPickupTime), { zone: AUCKLAND_TIMEZONE }).toISODate();
+              const row = warehouse && date ? daily.get(date)?.[warehouse] : undefined;
+              if (!row) continue;
+              const items = Array.isArray(order.items) ? order.items : [];
+              const picked = items.filter((item: any) => item?.status === "Picked");
+              row.onlineOrders += 1;
+              row.onlineItems += (picked.length ? picked : items).reduce((sum: number, item: any) => sum + Math.max(0, Number(item?.qty) || 0), 0);
+            }
+            const countCounterPickup = (pickup: admin.firestore.DocumentData) => {
+              const warehouse = normalizeWarehouseId(pickup.warehouseId);
+              if (!warehouse) return;
+              const requestDays = new Map<string, { outbound: boolean; returned: boolean }>();
+              for (const item of counterItems(pickup)) {
+                const returned = returnSelection(pickup, item);
+                const date = (returned || outboundCompletion(pickup, item))?.toISODate();
+                const row = date ? daily.get(date)?.[warehouse] : undefined;
+                if (!row || !date) continue;
+                const flags = requestDays.get(date) || { outbound: false, returned: false };
+                requestDays.set(date, flags);
+                const qty = Math.max(0, Number(item.qty) || 0);
+                row.grossLocalItems += qty;
+                if (returned) {
+                  flags.returned = true;
+                  row.returnItems += qty;
+                } else {
+                  flags.outbound = true;
+                }
+              }
+              for (const [date, flags] of requestDays) {
+                const row = daily.get(date)![warehouse];
+                row.grossLocalRequests += 1;
+                if (flags.returned) row.returnRequests += 1;
+                if (flags.returned && !flags.outbound) row.returnOnlyRequests += 1;
+              }
+            };
+            for (let index = 0; index < counterSnap.docs.length; index += 20) {
+              const pickups = await Promise.all(counterSnap.docs.slice(index, index + 20).map(withRecordedReturnSelection));
+              pickups.forEach(countCounterPickup);
+            }
+            const days = [...daily].map(([date, byWarehouse]) => {
+              const warehouses = Object.values(byWarehouse).map(row => {
+                const localRequests = row.grossLocalRequests - row.returnOnlyRequests;
+                const localItems = row.grossLocalItems - row.returnItems;
+                return { ...row, localRequests, localItems, totalTransactions: row.onlineOrders + localRequests, totalItems: row.onlineItems + localItems };
+              });
+              const totals = warehouses.reduce((sum, row) => ({
+                onlineOrders: sum.onlineOrders + row.onlineOrders, onlineItems: sum.onlineItems + row.onlineItems,
+                localRequests: sum.localRequests + row.localRequests, localItems: sum.localItems + row.localItems,
+                grossLocalRequests: sum.grossLocalRequests + row.grossLocalRequests, grossLocalItems: sum.grossLocalItems + row.grossLocalItems,
+                returnRequests: sum.returnRequests + row.returnRequests, returnOnlyRequests: sum.returnOnlyRequests + row.returnOnlyRequests,
+                returnItems: sum.returnItems + row.returnItems,
+                totalTransactions: sum.totalTransactions + row.totalTransactions, totalItems: sum.totalItems + row.totalItems
+              }), { onlineOrders: 0, onlineItems: 0, localRequests: 0, localItems: 0, grossLocalRequests: 0, grossLocalItems: 0,
+                returnRequests: 0, returnOnlyRequests: 0, returnItems: 0, totalTransactions: 0, totalItems: 0 });
+              return { date, warehouses, totals };
+            });
+            return { success: true, ...days[days.length - 1], days, timezone: AUCKLAND_TIMEZONE, generatedAt: nowAucklandIso() };
+        })().then(data => {
+          dashboardCache.delete(key);
+          dashboardCache.set(key, { expires: Date.now() + 30_000, data });
+          if (dashboardCache.size > 32) dashboardCache.delete(dashboardCache.keys().next().value!);
+          return data;
+        }).finally(() => dashboardPending.delete(key));
+        dashboardPending.set(key, pending);
       }
-      const countCounterPickup = (pickup: admin.firestore.DocumentData) => {
-        const warehouse = normalizeWarehouseId(pickup.warehouseId);
-        if (!warehouse) return;
-        const requestDays = new Map<string, { outbound: boolean; returned: boolean }>();
-        for (const item of counterItems(pickup)) {
-          const returned = returnSelection(pickup, item);
-          const date = (returned || outboundCompletion(pickup, item))?.toISODate();
-          const row = date ? daily.get(date)?.[warehouse] : undefined;
-          if (!row || !date) continue;
-          const flags = requestDays.get(date) || { outbound: false, returned: false };
-          requestDays.set(date, flags);
-          const qty = Math.max(0, Number(item.qty) || 0);
-          row.grossLocalItems += qty;
-          if (returned) {
-            flags.returned = true;
-            row.returnItems += qty;
-          } else {
-            flags.outbound = true;
-          }
-        }
-        for (const [date, flags] of requestDays) {
-          const row = daily.get(date)![warehouse];
-          row.grossLocalRequests += 1;
-          if (flags.returned) row.returnRequests += 1;
-          if (flags.returned && !flags.outbound) row.returnOnlyRequests += 1;
-        }
-      };
-      for (let index = 0; index < counterSnap.docs.length; index += 20) {
-        const pickups = await Promise.all(counterSnap.docs.slice(index, index + 20).map(withRecordedReturnSelection));
-        pickups.forEach(countCounterPickup);
-      }
-      const days = [...daily].map(([date, byWarehouse]) => {
-        const warehouses = Object.values(byWarehouse).map(row => {
-          const localRequests = row.grossLocalRequests - row.returnOnlyRequests;
-          const localItems = row.grossLocalItems - row.returnItems;
-          return { ...row, localRequests, localItems, totalTransactions: row.onlineOrders + localRequests, totalItems: row.onlineItems + localItems };
-        });
-        const totals = warehouses.reduce((sum, row) => ({
-          onlineOrders: sum.onlineOrders + row.onlineOrders, onlineItems: sum.onlineItems + row.onlineItems,
-          localRequests: sum.localRequests + row.localRequests, localItems: sum.localItems + row.localItems,
-          grossLocalRequests: sum.grossLocalRequests + row.grossLocalRequests, grossLocalItems: sum.grossLocalItems + row.grossLocalItems,
-          returnRequests: sum.returnRequests + row.returnRequests, returnOnlyRequests: sum.returnOnlyRequests + row.returnOnlyRequests,
-          returnItems: sum.returnItems + row.returnItems,
-          totalTransactions: sum.totalTransactions + row.totalTransactions, totalItems: sum.totalItems + row.totalItems
-        }), { onlineOrders: 0, onlineItems: 0, localRequests: 0, localItems: 0, grossLocalRequests: 0, grossLocalItems: 0,
-          returnRequests: 0, returnOnlyRequests: 0, returnItems: 0, totalTransactions: 0, totalItems: 0 });
-        return { date, warehouses, totals };
-      });
-      return res.json({ success: true, ...days[days.length - 1], days, timezone: AUCKLAND_TIMEZONE, generatedAt: nowAucklandIso() });
+      return res.json(await pending);
     } catch (error: any) {
       console.error("CN Dashboard Stats Error:", error);
       return res.status(500).json({ success: false, error: error.message || "Failed to load dashboard statistics" });
@@ -1022,6 +1064,40 @@ async function startServer() {
     }
   });
 
+  app.get("/api/skus/list", authenticate, async (req: any, res) => {
+    const role = req.user.roleTemplate || req.user.role;
+    if (!hasPermission(req.user, "View SKU") || ["Sales", "Reception", "Warehouse"].includes(role)) {
+      return res.status(403).json({ success: false, error: "SKU viewing permission required." });
+    }
+    const after = req.query.after;
+    if (after !== undefined && (typeof after !== "string" || after.length > 1500 || after.includes("/"))) {
+      return res.status(400).json({ success: false, error: "Invalid SKU cursor." });
+    }
+    const currentDb = await initDb();
+    if (!currentDb) return res.status(503).json({ success: false, error: "Database not initialized" });
+
+    try {
+      const collection = currentDb.collection("skus");
+      let query = collection.orderBy("sku").orderBy(admin.firestore.FieldPath.documentId());
+      if (after) {
+        const cursor = await collection.doc(after).get();
+        if (!cursor.exists) return res.status(400).json({ success: false, error: "Invalid SKU cursor." });
+        query = query.startAfter(cursor);
+      }
+      const pageSize = 50;
+      const snapshot = await query.select("sku", "productName", "ref1", "ref2").limit(pageSize + 1).get();
+      const page = snapshot.docs.slice(0, pageSize);
+      return res.json({
+        success: true,
+        skus: page.map(doc => ({ ...doc.data(), id: doc.id })),
+        nextCursor: snapshot.docs.length > pageSize ? page[pageSize - 1].id : null
+      });
+    } catch (error) {
+      console.error("SKU list failed:", error);
+      return res.status(500).json({ success: false, error: "Failed to load SKU catalog." });
+    }
+  });
+
   // SKU and reference search for order and counter pickup forms
   app.get("/api/skus/search", authenticate, async (req: any, res) => {
     const currentDb = await initDb();
@@ -1061,7 +1137,84 @@ async function startServer() {
     }
   });
 
-  app.post("/api/skus/import-refs", authenticate, async (req: any, res) => {
+  app.post("/api/skus/manage", authenticate, verifySkuManagementKey, async (req: any, res) => {
+    const { mode, operations } = req.body;
+    const superAdmin = isSuperAdmin(req.user.username) || isSuperAdmin(req.user.email || "");
+    const skuAdmin = superAdmin || req.user.role === "Admin";
+    const authorized = mode === "edit" ? hasPermission(req.user, "Edit SKU")
+      : mode === "import" ? hasPermission(req.user, "Upload SKU")
+      : mode === "clear" ? superAdmin
+      : ["delete", "repair"].includes(mode) && skuAdmin;
+    if (!authorized) return res.status(403).json({ success: false, error: "SKU management permission required." });
+
+    const permittedTypes: Record<string, string[]> = {
+      edit: ["delete", "set"], import: ["set"], delete: ["delete"], clear: ["delete"], repair: ["delete", "update"]
+    };
+    const allowedFields = new Set(["sku", "productName", "location", "locations", "createdAt", "updatedAt", "ref1", "ref2"]);
+    const validId = (value: unknown) =>
+      typeof value === "string" && value.length > 0 && Buffer.byteLength(value) <= 1500 &&
+      !value.includes("/") && value !== "." && value !== ".." && !/^__.*__$/.test(value);
+    if (!Array.isArray(operations) || operations.length === 0 || operations.length > 500 ||
+        operations.some(op => {
+          if (!op || !validId(op.id) || !permittedTypes[mode].includes(op.type)) return true;
+          if (op.type === "delete") return op.data !== undefined;
+          if (!op.data || typeof op.data !== "object" || Array.isArray(op.data)) return true;
+          const fields = Object.entries(op.data);
+          if (fields.length === 0) return true;
+          if (op.type === "set" &&
+              (typeof op.data.sku !== "string" || op.data.sku.replace(/\//g, "_") !== op.id)) return true;
+          return fields.some(([field, value]) => {
+            if (!allowedFields.has(field)) return true;
+            if (field !== "locations") return typeof value !== "string" || value.length > 2000;
+            return !value || typeof value !== "object" || Array.isArray(value) ||
+              Object.entries(value).some(([warehouse, location]) =>
+                !/^[A-Za-z0-9_-]{1,80}$/.test(warehouse) || typeof location !== "string" || location.length > 2000
+              );
+          });
+        }) || new Set(operations.map(op => op.id)).size !== operations.length ||
+        (mode === "edit" && (operations.length > 2 || operations.filter(op => op.type === "set").length !== 1))) {
+      return res.status(400).json({ success: false, error: "Invalid SKU changes." });
+    }
+
+    const currentDb = await initDb();
+    if (!currentDb) return res.status(503).json({ success: false, error: "Database not initialized." });
+    try {
+      const collection = currentDb.collection("skus");
+      if (mode === "edit" && operations.length === 2) {
+        const oldRef = collection.doc(operations.find(op => op.type === "delete").id);
+        const replacement = operations.find(op => op.type === "set");
+        const newRef = collection.doc(replacement.id);
+        const moved = await currentDb.runTransaction(async tx => {
+          const [oldSku, newSku] = await tx.getAll(oldRef, newRef);
+          if (!oldSku.exists || newSku.exists) return false;
+          const oldData = oldSku.data();
+          tx.create(newRef, {
+            ...oldData,
+            ...replacement.data,
+            createdAt: oldData?.createdAt ?? replacement.data.createdAt
+          });
+          tx.delete(oldRef);
+          return true;
+        });
+        if (!moved) return res.status(409).json({ success: false, error: "SKU was moved or the new code already exists." });
+        return res.json({ success: true });
+      }
+      const batch = currentDb.batch();
+      for (const op of operations) {
+        const doc = collection.doc(op.id);
+        if (op.type === "delete") batch.delete(doc);
+        else if (op.type === "set") batch.set(doc, op.data, { merge: true });
+        else batch.update(doc, op.data);
+      }
+      await batch.commit();
+      return res.json({ success: true });
+    } catch (error) {
+      console.error("SKU management write failed:", error);
+      return res.status(500).json({ success: false, error: "Failed to save SKU changes." });
+    }
+  });
+
+  app.post("/api/skus/import-refs", authenticate, verifySkuManagementKey, async (req: any, res) => {
     if (!hasPermission(req.user, "Upload SKU")) {
       return res.status(403).json({ success: false, error: "SKU upload permission required." });
     }
