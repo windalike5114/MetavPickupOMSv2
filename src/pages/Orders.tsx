@@ -3,7 +3,7 @@ import { collection, query, getDocs } from 'firebase/firestore';
 import { db } from '../firebase';
 import { Order } from '../types';
 import { useAuth } from '../components/AuthProvider';
-import { logAction, cn, safeSearch, formatDate, hasPermission, isAdmin, getWarehouseDisplayName } from '../utils';
+import { logAction, cn, safeSearch, formatDate, hasPermission, isAdmin, getWarehouseDisplayName, getAucklandDateKey } from '../utils';
 import { 
   Search, 
   Download, 
@@ -43,6 +43,9 @@ import { PageHeader } from '../components/PageHeader';
 const ORDER_CACHE_DB = 'mvp_orders_cache_v1';
 const ORDER_CACHE_STORE = 'order_lists';
 const ORDER_CACHE_TTL_MS = 60 * 1000;
+const CN_ACTIVE_REFRESH_MS = 15_000;
+const CN_IDLE_REFRESH_MS = 60_000;
+const CN_IDLE_AFTER_MS = 120_000;
 
 type OrderCacheRecord = {
   key: string;
@@ -115,6 +118,14 @@ const mergeOrdersById = (base: Order[], incoming: Order[]): Order[] => {
   return Array.from(map.values()).sort((a: Order, b: Order) => getOrderSortMs(b) - getOrderSortMs(a));
 };
 
+const hasOrderChanges = (previous: Order[], incoming: Order[]) => {
+  const byId = new Map(previous.map(order => [order.id, order]));
+  return incoming.some(order => {
+    const baseline = byId.get(order.id);
+    return !baseline || getOrderSortMs(order) !== getOrderSortMs(baseline) || order.status !== baseline.status;
+  });
+};
+
 export const Orders = () => {
   const { profile, user, activeWarehouse, token } = useAuth();
   const { bulkUpdateStatus } = useOrderService(token, API_BASE_URL);
@@ -156,6 +167,7 @@ export const Orders = () => {
   const [isScrolled, setIsScrolled] = useState(false);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const orderRequest = useRef<AbortController | null>(null);
+  const pickupSnapshot = useRef<{ key: string; orders: Order[] } | null>(null);
   const [showPickupModal, setShowPickupModal] = useState(false);
   const [pickupOrder, setPickupOrder] = useState<Order | null>(null);
   const [confirmingPickup, setConfirmingPickup] = useState(false);
@@ -246,21 +258,63 @@ export const Orders = () => {
   }, [notification]);
 
   useEffect(() => {
-    if (isCnApiMode || activeWarehouse) void fetchOrders('initial');
+    let stopped = false;
+    let refreshing = false;
+    let timer: number | undefined;
+    let lastActivityAt = Date.now();
+    let lastRefreshAt = Date.now();
+    const activityEvents = ['pointerdown', 'keydown', 'wheel'] as const;
+
+    const canPoll = () => isCnApiMode && Boolean(token) && document.visibilityState === 'visible' &&
+      (!pickedDate || pickedDate >= getAucklandDateKey(Date.now()));
+    const isIdle = () => Date.now() - lastActivityAt >= CN_IDLE_AFTER_MS;
+    const stopTimer = () => window.clearTimeout(timer);
+
+    const schedule = () => {
+      stopTimer();
+      if (stopped || refreshing || !canPoll()) return;
+      const interval = isIdle() ? CN_IDLE_REFRESH_MS : CN_ACTIVE_REFRESH_MS;
+      timer = window.setTimeout(() => {
+        // An active timer may have been scheduled just before the tab became idle.
+        if (isIdle() && Date.now() - lastRefreshAt < CN_IDLE_REFRESH_MS) schedule();
+        else void refresh('background');
+      }, Math.max(0, interval - (Date.now() - lastRefreshAt)));
+    };
+
+    const refresh = async (mode: 'initial' | 'background') => {
+      if (stopped || refreshing || (mode === 'background' && !canPoll())) return;
+      stopTimer();
+      refreshing = true;
+      const changed = await fetchOrders(mode);
+      if (stopped) return;
+      refreshing = false;
+      lastRefreshAt = Date.now();
+      if (changed) lastActivityAt = lastRefreshAt;
+      schedule();
+    };
+
+    const onActivity = () => {
+      if (!canPoll()) return;
+      const wasIdle = isIdle();
+      lastActivityAt = Date.now();
+      if (wasIdle) schedule();
+    };
+    const onVisibilityChange = () => {
+      if (!canPoll()) { stopTimer(); return; }
+      lastActivityAt = Date.now();
+      void refresh('background');
+    };
+
+    if (isCnApiMode || activeWarehouse) void refresh('initial');
     if (isCnApiMode) {
-      const refreshVisible = () => {
-        if (document.visibilityState === 'visible') void fetchOrders('background');
-      };
-      const timer = window.setInterval(refreshVisible, 15000);
-      document.addEventListener('visibilitychange', refreshVisible);
-      return () => {
-        window.clearInterval(timer);
-        document.removeEventListener('visibilitychange', refreshVisible);
-        orderRequest.current?.abort();
-        orderRequest.current = null;
-      };
+      document.addEventListener('visibilitychange', onVisibilityChange);
+      activityEvents.forEach(event => document.addEventListener(event, onActivity, { passive: true }));
     }
     return () => {
+      stopped = true;
+      stopTimer();
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      activityEvents.forEach(event => document.removeEventListener(event, onActivity));
       orderRequest.current?.abort();
       orderRequest.current = null;
     };
@@ -318,8 +372,14 @@ export const Orders = () => {
         });
         const data = await response.json();
         if (!response.ok || !data.success) throw new Error(data.error || '无法获取取货明细');
-        if (!signal?.aborted) setOrders(data.orders || []);
-        return;
+        if (signal.aborted) return;
+        const incoming = (data.orders || []) as Order[];
+        const key = [user?.uid, pickedDate, pickedWarehouse].join(':');
+        const previous = pickupSnapshot.current;
+        const changed = previous?.key === key && (previous.orders.length !== incoming.length || hasOrderChanges(previous.orders, incoming));
+        pickupSnapshot.current = { key, orders: incoming };
+        setOrders(incoming);
+        return changed;
       }
       const cacheScope = isCnApiMode ? 'cn-all-v2' : 'nz';
       const warehouseScope = isCnApiMode ? 'all-warehouses' : activeWarehouse;
@@ -360,6 +420,7 @@ export const Orders = () => {
       }
       if (!data.success) throw new Error(data.error || 'Failed to fetch orders');
       const incoming = (data.orders || []) as Order[];
+      const changed = hasOrderChanges(cached?.orders || [], incoming);
       const nextOrders = cached?.orders?.length ? mergeOrdersById(cached.orders, incoming) : incoming;
       if (signal?.aborted) return;
       setOrders(nextOrders);
@@ -375,6 +436,7 @@ export const Orders = () => {
         lastSyncAt,
         updatedAt: new Date().toISOString()
       });
+      return changed;
     } catch (err: any) {
       if (signal?.aborted) return;
       console.error('Error fetching orders:', err);
