@@ -4,6 +4,8 @@ import { collection, query, getDocs, addDoc, updateDoc, deleteDoc, doc, getDoc, 
 import { db } from '../firebase';
 import { useAuth } from '../components/AuthProvider';
 import { SKU } from '../types';
+import { API_BASE_URL } from '../constants';
+import { parseSkuReferenceSheet } from '../lib/skuReferences';
 import { logAction, hasPermission, isAdmin, isSystemAdmin, getSkuWarehouseLocation, getWarehouseDisplayName } from '../utils';
 import { 
   Search, 
@@ -29,7 +31,7 @@ import { PageHeader } from '../components/PageHeader';
 import { useDebounce } from '../hooks/useDebounce';
 
 export const SKUDatabase = () => {
-  const { profile, user, activeWarehouse } = useAuth();
+  const { profile, user, activeWarehouse, token } = useAuth();
   const navigate = useNavigate();
   const [skus, setSkus] = useState<SKU[]>([]);
   const [totalCount, setTotalCount] = useState(0);
@@ -798,7 +800,60 @@ export const SKUDatabase = () => {
   };
 
   const handleBatchUpload = async () => {
-    await processBatchUpload(csvData);
+    let processed = 0;
+    try {
+      const sheet = parseSkuReferenceSheet(csvData);
+      if (!sheet) {
+        await processBatchUpload(csvData);
+        return;
+      }
+      if (!token || !hasPermission(profile, 'Upload SKU', profile?.email)) {
+        throw new Error('SKU upload permission required.');
+      }
+      setUploading(true);
+      let updated = 0;
+      let unchanged = 0;
+      const unmatched: string[] = [];
+      const ambiguous: string[] = [];
+
+      for (let offset = 0; offset < sheet.rows.length; offset += 30) {
+        const rows = sheet.rows.slice(offset, offset + 30);
+        const response = await fetch(API_BASE_URL + '/api/skus/import-refs', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-v2-auth-token': 'Bearer ' + token
+          },
+          body: JSON.stringify({ rows })
+        });
+        const result = await response.json();
+        if (!response.ok || !result.success) {
+          throw new Error(result.error || 'Failed to import SKU references.');
+        }
+        updated += result.updated;
+        unchanged += result.unchanged;
+        unmatched.push(...result.unmatched);
+        ambiguous.push(...result.ambiguous);
+        processed += rows.length;
+      }
+
+      const summary = [
+        'References updated: ' + updated,
+        'Already up to date: ' + unchanged,
+        'No references in CSV: ' + sheet.empty,
+        'SKU not found: ' + unmatched.length + (unmatched.length ? ' (' + unmatched.slice(0, 5).join(', ') + ')' : ''),
+        'Multiple matching SKU records: ' + ambiguous.length + (ambiguous.length ? ' (' + ambiguous.slice(0, 5).join(', ') + ')' : '')
+      ];
+      alert(summary.join('\n'));
+      setShowUploadModal(false);
+      setSelectedFileName('');
+      setCsvData('');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to import SKU references.';
+      alert(processed ? processed + ' rows processed. ' + message + ' You can retry the same CSV.' : message);
+    } finally {
+      setUploading(false);
+    }
   };
 
   const downloadTemplate = () => {
@@ -1239,7 +1294,7 @@ export const SKUDatabase = () => {
               <div className="p-4 bg-blue-50 border border-blue-100 rounded-xl text-blue-700 text-sm flex flex-col gap-3">
                 <div className="flex items-start gap-3">
                   <AlertCircle className="w-5 h-5 flex-shrink-0" />
-                  <p>Upload a CSV file or paste data below. Format: <strong>SKU,Product Name,Location</strong>. Only SKU is required.</p>
+                  <p>Upload a CSV file or paste data below. Format: <strong>SKU,Product Name,Location</strong>. Only SKU is required. To update references, use <strong>Code(Unique), Sub Name 1, Sub Name 2</strong>.</p>
                 </div>
                 <button 
                   onClick={downloadTemplate}
