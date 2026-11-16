@@ -24,6 +24,7 @@ import {
   UserPlus
 } from 'lucide-react';
 
+import { subscribeDuringWorkHours, getWorkWindow } from '../lib/workHours';
 import { useLocation } from 'react-router-dom';
 import { PageHeader } from '../components/PageHeader';
 
@@ -65,6 +66,17 @@ export default function UserGroups() {
   const [searchTerm, setSearchTerm] = useState('');
 
   const canManage = isAdmin(currentProfile, currentProfile?.email) || hasPermission(currentProfile, 'Manage User Groups', currentProfile?.email);
+
+  const loadGroupsOnce = async () => {
+    try {
+      const snapshot = await getDocs(collection(db, 'userGroups'));
+      setGroups(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as UserGroup)));
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Failed to load groups.');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const loadCnGroups = async () => {
     if (!canManage || !token) { setLoading(false); return; }
@@ -116,7 +128,15 @@ export default function UserGroups() {
       });
     };
 
-    setupGroupsListener();
+    const stopGroups = subscribeDuringWorkHours('nz', () => {
+      retryCount = 0;
+      setupGroupsListener();
+      return () => {
+        unsubscribeGroups?.();
+        unsubscribeGroups = null;
+        if (retryTimeout) clearTimeout(retryTimeout);
+      };
+    }, loadGroupsOnce);
 
     const fetchUsers = async () => {
       try {
@@ -131,8 +151,7 @@ export default function UserGroups() {
 
     fetchUsers();
     return () => {
-      if (unsubscribeGroups) unsubscribeGroups();
-      if (retryTimeout) clearTimeout(retryTimeout);
+      stopGroups();
     };
   }, [isCnRoute, canManage, token]);
 
@@ -167,6 +186,7 @@ export default function UserGroups() {
 
       closeModal();
       if (isCnRoute) await loadCnGroups();
+      else if (!getWorkWindow('nz').open) await loadGroupsOnce();
     } catch (error: any) {
       console.error("Error saving group:", error);
       setError(`Failed to save group: ${error.message}`);
@@ -192,6 +212,7 @@ export default function UserGroups() {
 
       setShowDeleteConfirm(null);
       if (isCnRoute) await loadCnGroups();
+      else if (!getWorkWindow('nz').open) await loadGroupsOnce();
     } catch (error: any) {
       console.error("Error deleting group:", error);
       setError(`Failed to delete group: ${error.message}`);

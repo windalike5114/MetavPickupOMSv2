@@ -1,5 +1,7 @@
+import type { QuerySnapshot, DocumentData } from 'firebase/firestore';
+import { startWorkPolling, subscribeDuringWorkHours } from '../lib/workHours';
 import { useEffect, useRef, useState } from 'react';
-import { collection, query, where, onSnapshot } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, getDocs } from 'firebase/firestore';
 import { db } from '../firebase';
 import { useAuth } from '../components/AuthProvider';
 import { useNavigate, useLocation } from 'react-router-dom';
@@ -167,7 +169,7 @@ export const usePickingNotifications = () => {
       where('warehouseStatus', '==', 'Pending')
     );
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
+    const applySnapshot = (snapshot: QuerySnapshot<DocumentData>) => {
       if (!isInitialized) {
         snapshot.docs.forEach((d) => knownOrderIds.current.add(d.id));
         setIsInitialized(true);
@@ -193,16 +195,11 @@ export const usePickingNotifications = () => {
           knownOrderIds.current.delete(orderId);
         }
       });
-    }, (error) => {
-      console.error('Picking listener error:', error);
-      if (error.message.includes('permission-denied')) {
-        console.warn('Permission denied for picking queue. Stopping listener.');
-      }
-    });
-
-    return () => {
-      unsubscribe();
+      knownOrderIds.current = new Set(snapshot.docs.map(order => order.id));
     };
+    return subscribeDuringWorkHours('nz', () => onSnapshot(q, applySnapshot, error => {
+      console.error('Picking listener error:', error);
+    }), async () => applySnapshot(await getDocs(q)), false);
   }, [user?.uid, activeWarehouse, hasPickingPermission, isInitialized, isCnRoute, navigate, routePrefix]);
 
   useEffect(() => {
@@ -284,12 +281,11 @@ export const usePickingNotifications = () => {
       }
     };
 
-    loadCounterPickups();
-    const timer = window.setInterval(loadCounterPickups, 15000);
+    const stopPolling = startWorkPolling({ site: 'nz', interval: 15_000, load: loadCounterPickups, loadOnMount: false, whileHidden: true });
 
     return () => {
       stopped = true;
-      window.clearInterval(timer);
+      stopPolling();
     };
   }, [user?.uid, token, activeWarehouse, hasPickingPermission, navigate, routePrefix]);
 

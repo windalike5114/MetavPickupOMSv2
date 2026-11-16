@@ -772,7 +772,7 @@ async function startServer() {
         effectiveWarehouses = requestedWh ? [requestedWh] : effectiveWarehouses;
       }
       let orders: any[] = [];
-      if (isCnPortal && !warehouseId && Number.isFinite(updatedAfterMs) && updatedAfterMs > 0) {
+      if ((!isCnPortal || !warehouseId) && Number.isFinite(updatedAfterMs) && updatedAfterMs > 0) {
         // Both ISO strings and Firestore timestamps are used for updatedAt.
         const collection = currentDb.collection("orders");
         const cursorIso = new Date(updatedAfterMs).toISOString();
@@ -784,7 +784,12 @@ async function startServer() {
         ]);
         const changed = [isoUpdates, timestampUpdates, newOrders]
           .flatMap(snapshot => snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id })))
-          .filter((order: any) => !order.warehouseId || ["AKL", "CHC"].includes(order.warehouseId));
+          .filter((order: any) => {
+            if (!order.warehouseId) return true;
+            if (isCnPortal) return ["AKL", "CHC"].includes(order.warehouseId);
+            if (warehouseId) return order.warehouseId === warehouseId;
+            return !effectiveWarehouses || effectiveWarehouses.includes(order.warehouseId);
+          });
         orders = mergeOrdersDedup(changed, []);
       } else if (isCnPortal && !warehouseId) {
         const [warehouseOrders, unassignedOrders] = await Promise.all([
